@@ -1,0 +1,168 @@
+from __future__ import annotations
+
+import logging
+
+from finanzas.config.settings import settings
+from finanzas.data.database import connect, init_database
+from finanzas.data.repositories.catalogos_repository import CatalogosRepository
+from finanzas.domain.entities import ReglasFinancieras
+
+logger = logging.getLogger(__name__)
+
+# ═══════════════════════════════════════════════════════════
+# Catálogos base
+#
+# Son los mismos de la hoja «Catálogos» del Excel original,
+# más las categorías de ingreso, ahorro e inversión que allá
+# vivían mezcladas con las de gasto.
+# ═══════════════════════════════════════════════════════════
+
+#: (categoría, tipo, [subcategorías]) en el orden en que se muestran.
+CATEGORIAS_BASE: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("Vivienda", "Gasto", ("Renta/Hipoteca", "Mantenimiento", "Hogar")),
+    ("Servicios", "Gasto", ("Luz", "Agua", "Gas", "Internet", "Telefonía")),
+    ("Supermercado", "Gasto", ("Despensa",)),
+    ("Restaurantes", "Gasto", ("Comida fuera", "Café/Snacks")),
+    ("Transporte", "Gasto", ("Gasolina", "Transporte público", "Taxi/App")),
+    ("Salud", "Gasto", ("Médico", "Medicinas", "Seguro")),
+    ("Educación", "Gasto", ("Cursos", "Libros")),
+    ("Entretenimiento", "Gasto", ("Cine/Eventos", "Hobbies")),
+    ("Compras", "Gasto", ("Ropa", "Otro")),
+    ("Suscripciones", "Gasto", ("Streaming", "Software")),
+    ("Mascotas", "Gasto", ("Veterinario",)),
+    ("Viajes", "Gasto", ("Hospedaje", "Vuelos")),
+    ("Regalos", "Gasto", ("Otro",)),
+    ("Impuestos", "Gasto", ("Otro",)),
+    ("Deudas", "Gasto", ("Tarjeta de crédito", "Préstamo")),
+    ("Cuidado personal", "Gasto", ("Skincare", "Otro")),
+    ("Tecnología", "Gasto", ("Hardware", "Software")),
+    ("Donativos", "Gasto", ("Otro",)),
+    ("Comisiones", "Gasto", ("Comisión bancaria",)),
+    ("Otros", "Gasto", ("Otro",)),
+    ("Sueldo", "Ingreso", ("Nómina", "Aguinaldo", "Bono")),
+    ("Ingresos extra", "Ingreso", ("Freelance", "Venta", "Reembolso")),
+    ("Rendimientos", "Ingreso", ("Intereses", "Dividendos")),
+    ("Otros ingresos", "Ingreso", ("Otro",)),
+    ("Ahorro programado", "Ahorro", ("Fondo de emergencia", "Meta")),
+    ("Aportación a inversión", "Inversión", ("Portafolio", "Retiro")),
+    ("Traspaso entre cuentas", "Transferencia", ("Otro",)),
+)
+
+#: Cuentas de arranque, con su tipo.
+CUENTAS_BASE: tuple[tuple[str, str], ...] = (
+    ("Efectivo", "Efectivo"),
+    ("Cuenta principal", "Banco"),
+    ("Cuenta ahorro", "Banco"),
+    ("Tarjeta crédito", "Crédito"),
+    ("Inversiones", "Inversión"),
+    ("Otra", "Otro"),
+)
+
+#: Medios de pago del catálogo original.
+MEDIOS_PAGO_BASE: tuple[str, ...] = (
+    "Efectivo",
+    "Débito",
+    "Crédito",
+    "Transferencia",
+    "Domiciliación",
+    "Otro",
+)
+
+
+def sembrar_catalogos(db_path: str | None = None) -> dict[str, int]:
+    """
+    Inserta los catálogos base si aún no existen.
+
+    Es idempotente: los nombres son únicos, así que volver a ejecutarlo
+    no duplica nada ni pisa lo que el usuario haya editado.
+
+    Returns
+    -------
+    dict
+        Cuántos elementos nuevos se insertaron por catálogo.
+    """
+    insertados = {"categorias": 0, "subcategorias": 0, "cuentas": 0, "medios_pago": 0}
+
+    with connect(db_path) as conexion:
+        for orden, (categoria, tipo, subcategorias) in enumerate(CATEGORIAS_BASE):
+            cursor = conexion.execute(
+                """
+                INSERT INTO categorias (nombre, tipo, orden) VALUES (?, ?, ?)
+                ON CONFLICT(nombre) DO NOTHING
+                """,
+                (categoria, tipo, orden),
+            )
+            insertados["categorias"] += cursor.rowcount
+
+            categoria_id = conexion.execute(
+                "SELECT id FROM categorias WHERE nombre = ?", (categoria,)
+            ).fetchone()["id"]
+
+            for subcategoria in subcategorias:
+                cursor = conexion.execute(
+                    """
+                    INSERT INTO subcategorias (categoria_id, nombre) VALUES (?, ?)
+                    ON CONFLICT(categoria_id, nombre) DO NOTHING
+                    """,
+                    (categoria_id, subcategoria),
+                )
+                insertados["subcategorias"] += cursor.rowcount
+
+        for cuenta, tipo_cuenta in CUENTAS_BASE:
+            cursor = conexion.execute(
+                """
+                INSERT INTO cuentas (nombre, tipo) VALUES (?, ?)
+                ON CONFLICT(nombre) DO NOTHING
+                """,
+                (cuenta, tipo_cuenta),
+            )
+            insertados["cuentas"] += cursor.rowcount
+
+        for medio in MEDIOS_PAGO_BASE:
+            cursor = conexion.execute(
+                "INSERT INTO medios_pago (nombre) VALUES (?) "
+                "ON CONFLICT(nombre) DO NOTHING",
+                (medio,),
+            )
+            insertados["medios_pago"] += cursor.rowcount
+
+    logger.info("Catálogos sembrados: %s", insertados)
+    return insertados
+
+
+def sembrar_reglas(db_path: str | None = None) -> None:
+    """Guarda las reglas financieras por defecto si la tabla está vacía."""
+    repositorio = CatalogosRepository(db_path)
+
+    with connect(db_path) as conexion:
+        ya_hay = conexion.execute("SELECT COUNT(*) AS n FROM configuracion").fetchone()[
+            "n"
+        ]
+
+    if ya_hay:
+        return
+
+    repositorio.guardar_reglas(
+        ReglasFinancieras(
+            moneda=settings.moneda,
+            meta_ahorro_inversion=settings.meta_ahorro_inversion,
+            meses_fondo_emergencia=settings.meses_fondo_emergencia,
+            max_deseos=settings.max_deseos,
+            umbral_gasto_pequeno=settings.umbral_gasto_pequeno,
+            alerta_presupuesto=settings.alerta_presupuesto,
+            dia_inicio_ciclo=settings.dia_inicio_ciclo,
+        )
+    )
+    logger.info("Reglas financieras inicializadas con los valores por defecto")
+
+
+def preparar_base(db_path: str | None = None) -> None:
+    """
+    Deja la base lista para usarse: esquema, catálogos y reglas.
+
+    Se llama al arrancar la aplicación, de modo que un archivo borrado o
+    un clon recién bajado del repositorio funcionen sin pasos manuales.
+    """
+    init_database(db_path)
+    sembrar_catalogos(db_path)
+    sembrar_reglas(db_path)
