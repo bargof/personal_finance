@@ -92,6 +92,14 @@ class EstadoPresupuesto(StrEnum):
     CONFIGURAR = "Configurar"
 
 
+class EstadoDeseo(StrEnum):
+    """Situación de un deseo frente al saldo disponible."""
+
+    ALCANZA = "Alcanza"
+    CASI = "Casi"
+    LEJOS = "Falta mucho"
+
+
 class EstadoMeta(StrEnum):
     """Situación de una meta frente a su fecha límite y aportación."""
 

@@ -246,13 +246,41 @@ def fugas(movimientos: pd.DataFrame, umbral_gasto_pequeno: float) -> dict[str, f
 
 
 def flujo_por_cuenta(movimientos: pd.DataFrame) -> pd.DataFrame:
-    """Devuelve entradas, salidas y flujo neto por cuenta."""
+    """
+    Devuelve entradas, salidas y flujo neto por cuenta.
+
+    Atribuye cada transferencia a sus dos cuentas: sale del origen y
+    entra al destino. `impacto_caja` no sirve aquí porque mira la caja
+    completa, donde el traspaso vale cero.
+    """
     if movimientos.empty:
         return pd.DataFrame(columns=["cuenta", "entradas", "salidas", "flujo_neto"])
 
     df = movimientos.copy()
     df["entradas"] = df["impacto_caja"].clip(lower=0)
     df["salidas"] = -df["impacto_caja"].clip(upper=0)
+
+    # La pata de destino del traspaso, que `impacto_caja` deja fuera. Se
+    # omite si el DataFrame viene sin las columnas del destino, que es el
+    # caso de los agregados armados a mano.
+    columnas_destino = {"cuenta_destino_id", "cuenta_destino"}
+    traspasos = df.iloc[0:0]
+    if columnas_destino <= set(df.columns):
+        es_traspaso = (df["tipo"] == "Transferencia") & df["cuenta_destino_id"].notna()
+        if "pagado" in df.columns:
+            es_traspaso &= df["pagado"].astype(bool)
+        traspasos = df[es_traspaso]
+
+    if not traspasos.empty:
+        df.loc[traspasos.index, "salidas"] = traspasos["monto"]
+        destino = pd.DataFrame(
+            {
+                "cuenta": traspasos["cuenta_destino"],
+                "entradas": traspasos["monto"],
+                "salidas": 0.0,
+            }
+        )
+        df = pd.concat([df, destino], ignore_index=True)
 
     agrupado = df.groupby("cuenta", as_index=False)[["entradas", "salidas"]].sum()
     agrupado["flujo_neto"] = agrupado["entradas"] - agrupado["salidas"]

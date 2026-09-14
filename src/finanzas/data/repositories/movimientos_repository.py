@@ -22,6 +22,7 @@ _CAMPOS_ESCRITURA = (
     "categoria_id",
     "subcategoria_id",
     "cuenta_id",
+    "cuenta_destino_id",
     "medio_pago_id",
     "descripcion",
     "necesidad",
@@ -32,6 +33,9 @@ _CAMPOS_ESCRITURA = (
     "etiquetas",
     "nota",
     "estado",
+    "fecha_pago",
+    "descripcion_banco",
+    "referencia_externa",
 )
 
 
@@ -53,6 +57,8 @@ class MovimientosRepository:
         estado: str | None = None,
         texto: str | None = None,
         limite: int | None = None,
+        solo_por_pagar: bool = False,
+        proyectos: list[str] | None = None,
     ) -> pd.DataFrame:
         """
         Devuelve movimientos enriquecidos, filtrados por los criterios dados.
@@ -69,6 +75,10 @@ class MovimientosRepository:
             Búsqueda parcial sobre descripción, etiquetas y nota.
         limite : int, optional
             Máximo de filas a devolver, de la más reciente hacia atrás.
+        solo_por_pagar : bool
+            Si es True, deja sólo lo devengado que aún no se ha pagado.
+        proyectos : list of str, optional
+            Proyectos a incluir. Una lista vacía no filtra.
 
         Returns
         -------
@@ -87,17 +97,21 @@ class MovimientosRepository:
         if estado:
             condiciones.append("estado = ?")
             parametros.append(estado)
+        if solo_por_pagar:
+            condiciones.append("por_pagar > 0")
         if texto:
             condiciones.append(
-                "(descripcion LIKE ? OR etiquetas LIKE ? OR nota LIKE ?)"
+                "(descripcion LIKE ? OR etiquetas LIKE ? OR nota LIKE ? "
+                "OR proyecto LIKE ? OR descripcion_banco LIKE ?)"
             )
             patron = f"%{texto}%"
-            parametros.extend([patron, patron, patron])
+            parametros.extend([patron] * 5)
 
         for columna, valores in (
             ("tipo", tipos),
             ("categoria", categorias),
             ("cuenta", cuentas),
+            ("proyecto", proyectos),
         ):
             if valores:
                 marcadores = ", ".join("?" for _ in valores)
@@ -146,6 +160,110 @@ class MovimientosRepository:
             ).fetchall()
 
         return [fila["periodo"] for fila in filas]
+
+    def por_pagar(self) -> pd.DataFrame:
+        """
+        Devuelve los adeudos generados: lo gastado que sigue sin pagarse.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Una fila por movimiento devengado, con los días que lleva
+            pendiente, de más viejo a más reciente.
+        """
+        with connect(self._db_path) as conexion:
+            df = pd.read_sql_query("SELECT * FROM v_por_pagar ORDER BY fecha", conexion)
+
+        if not df.empty:
+            df["fecha"] = pd.to_datetime(df["fecha"])
+
+        return df
+
+    def proyectos(self) -> pd.DataFrame:
+        """
+        Devuelve un resumen por proyecto, del más gastado al que menos.
+
+        Un proyecto agrupa movimientos de cualquier categoría bajo un
+        esfuerzo común, así que la suma cruza categorías a propósito.
+        """
+        with connect(self._db_path) as conexion:
+            df = pd.read_sql_query(
+                "SELECT * FROM v_proyectos ORDER BY gasto DESC", conexion
+            )
+
+        if not df.empty:
+            for columna in ("desde", "hasta"):
+                df[columna] = pd.to_datetime(df[columna])
+
+        return df
+
+    def referencias_externas(self, referencias: list[str]) -> set[str]:
+        """
+        Devuelve cuáles de esos folios ya están registrados.
+
+        Donde el banco da folio, la deduplicación no necesita heurística:
+        el mismo folio es el mismo movimiento, sin importar que la fecha
+        de operación y la de cargo no coincidan.
+        """
+        limpias = [r.strip() for r in referencias if r and r.strip()]
+        if not limpias:
+            return set()
+
+        marcadores = ", ".join("?" for _ in limpias)
+        with connect(self._db_path) as conexion:
+            filas = conexion.execute(
+                f"SELECT referencia_externa FROM movimientos "
+                f"WHERE referencia_externa IN ({marcadores})",
+                limpias,
+            ).fetchall()
+
+        return {fila["referencia_externa"] for fila in filas}
+
+    def nombres_de_proyecto(self) -> list[str]:
+        """Devuelve los proyectos ya usados, para poblar el autocompletado."""
+        with connect(self._db_path) as conexion:
+            filas = conexion.execute(
+                "SELECT DISTINCT TRIM(proyecto) AS proyecto FROM movimientos "
+                "WHERE TRIM(proyecto) <> '' ORDER BY proyecto"
+            ).fetchall()
+
+        return [fila["proyecto"] for fila in filas]
+
+    def flujo_por_cuenta(self, periodo: str | None = None) -> pd.DataFrame:
+        """
+        Devuelve entradas, salidas y flujo neto por cuenta.
+
+        Sale de `v_flujo_cuentas`, que descompone cada transferencia en su
+        pata de origen y la de destino: por cuenta un traspaso no es
+        neutro aunque lo sea para la caja completa.
+        """
+        consulta = """
+            SELECT
+                cuenta,
+                COALESCE(SUM(CASE WHEN movimiento > 0 THEN movimiento END), 0)
+                    AS entradas,
+                COALESCE(SUM(CASE WHEN movimiento < 0 THEN -movimiento END), 0)
+                    AS salidas,
+                SUM(movimiento) AS flujo_neto
+            FROM v_flujo_cuentas
+        """
+        parametros: tuple[object, ...] = ()
+        if periodo is not None:
+            consulta += " WHERE periodo = ?"
+            parametros = (periodo,)
+        consulta += " GROUP BY cuenta ORDER BY flujo_neto DESC"
+
+        with connect(self._db_path) as conexion:
+            return pd.read_sql_query(consulta, conexion, params=parametros)
+
+    def total_por_pagar(self) -> float:
+        """Devuelve el saldo total de adeudos generados."""
+        with connect(self._db_path) as conexion:
+            fila = conexion.execute(
+                "SELECT COALESCE(SUM(monto), 0) AS total FROM v_por_pagar"
+            ).fetchone()
+
+        return float(fila["total"])
 
     def obtener(self, movimiento_id: int) -> pd.Series | None:
         """Devuelve un movimiento por id, o None si no existe."""
@@ -206,6 +324,23 @@ class MovimientosRepository:
                 valores,
             )
 
+    def marcar_pagado(self, movimiento_id: int, fecha_pago: date | None) -> None:
+        """
+        Fija o quita la fecha de pago de un movimiento.
+
+        Pasar None lo devuelve a devengado, que es la salida si se marcó
+        como pagado por error.
+        """
+        with connect(self._db_path) as conexion:
+            conexion.execute(
+                """
+                UPDATE movimientos
+                   SET fecha_pago = ?, actualizado_en = datetime('now')
+                 WHERE id = ?
+                """,
+                (fecha_pago.isoformat() if fecha_pago else None, movimiento_id),
+            )
+
     def eliminar(self, movimiento_id: int) -> None:
         """Elimina un movimiento."""
         with connect(self._db_path) as conexion:
@@ -239,6 +374,7 @@ def _a_valores(movimiento: Movimiento) -> list[object]:
         movimiento.categoria_id,
         movimiento.subcategoria_id,
         movimiento.cuenta_id,
+        movimiento.cuenta_destino_id,
         movimiento.medio_pago_id,
         movimiento.descripcion.strip(),
         str(movimiento.necesidad),
@@ -249,6 +385,9 @@ def _a_valores(movimiento: Movimiento) -> list[object]:
         movimiento.etiquetas.strip(),
         movimiento.nota.strip(),
         str(movimiento.estado),
+        movimiento.fecha_pago.isoformat() if movimiento.fecha_pago else None,
+        movimiento.descripcion_banco.strip(),
+        movimiento.referencia_externa.strip(),
     ]
 
 
@@ -259,7 +398,9 @@ def _tipar(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.copy()
     df["fecha"] = pd.to_datetime(df["fecha"])
-    for bandera in ("recurrente", "planeado"):
+    if "fecha_pago" in df.columns:
+        df["fecha_pago"] = pd.to_datetime(df["fecha_pago"], errors="coerce")
+    for bandera in ("recurrente", "planeado", "pagado"):
         if bandera in df.columns:
             df[bandera] = df[bandera].astype(bool)
 

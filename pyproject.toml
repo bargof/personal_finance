@@ -17,6 +17,7 @@ plotly = ">=6.7.0,<7.0"
 streamlit = ">=1.57,<2.0"
 pandera = ">=0.31.1,<0.32"
 openpyxl = ">=3.1,<4.0"
+pdfplumber = ">=0.11,<0.12"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0"

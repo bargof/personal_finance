@@ -44,9 +44,22 @@ SUBTIPOS = (
     "Otro",
 )
 
+por_pagar = servicios.movimientos.por_pagar()
+adeudo = resumen["por_pagar"]
+
 with st.container(horizontal=True):
     st.metric("Activos", moneda(resumen["activos"]), border=True)
-    st.metric("Pasivos", moneda(resumen["pasivos"]), border=True)
+    st.metric(
+        "Pasivos",
+        moneda(resumen["pasivos"]),
+        delta=f"incluye {moneda(adeudo)} por pagar" if adeudo else None,
+        delta_color="off",
+        border=True,
+        help=(
+            "Posiciones capturadas como pasivo más los adeudos generados: "
+            "gasto ya incurrido que todavía no se paga."
+        ),
+    )
     st.metric(
         "Patrimonio neto",
         moneda(resumen["patrimonio_neto"]),
@@ -59,7 +72,20 @@ with st.container(horizontal=True):
         border=True,
     )
 
-balance_tab, cierres_tab = st.tabs(["Balance actual", "Cierres mensuales"])
+# Un balance al que le faltan cuentas subestima el patrimonio sin avisar:
+# más vale decirlo que dejar que el número se lea como completo.
+sin_posicion = servicios.patrimonio.cuentas_sin_posicion()
+if not sin_posicion.empty:
+    faltantes = ", ".join(str(nombre) for nombre in sin_posicion["nombre"])
+    st.warning(
+        f"{len(sin_posicion)} cuentas activas todavía no tienen saldo en el "
+        f"balance, así que el patrimonio neto está incompleto: {faltantes}.",
+        icon=":material/link_off:",
+    )
+
+balance_tab, adeudos_tab, cierres_tab = st.tabs(
+    ["Balance actual", "Por pagar", "Cierres mensuales"]
+)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -80,10 +106,16 @@ with balance_tab:
                 hide_index=True,
                 column_config={
                     "id": None,
+                    "cuenta_id": None,
+                    "cuenta_tipo": None,
                     "nombre": st.column_config.TextColumn(
                         "Cuenta o activo", pinned=True
                     ),
                     "tipo": st.column_config.TextColumn("Tipo"),
+                    "cuenta": st.column_config.TextColumn(
+                        "Cuenta ligada",
+                        help="Cuenta del catálogo cuyo saldo refleja esta línea.",
+                    ),
                     "subtipo": st.column_config.TextColumn("Subtipo"),
                     "institucion": st.column_config.TextColumn("Institución"),
                     "saldo": st.column_config.NumberColumn("Saldo", format="$%.2f"),
@@ -168,6 +200,16 @@ with balance_tab:
 
     with st.container(border=True):
         st.subheader("Nueva posición")
+        st.caption(
+            "Liga la posición a una cuenta del catálogo cuando le corresponda: "
+            "así el saldo vive en un solo lugar. Déjala sin ligar para lo que "
+            "no es cuenta, como la casa o el auto."
+        )
+
+        pendientes = servicios.patrimonio.cuentas_sin_posicion()
+        opciones_cuenta = {"— sin ligar —": None} | {
+            fila.nombre: int(fila.id) for fila in pendientes.itertuples()
+        }
 
         with st.form("nueva_posicion", clear_on_submit=True, border=False):
             fila_1 = st.columns([2, 1, 1, 1])
@@ -177,21 +219,27 @@ with balance_tab:
                     "Cuenta o activo", placeholder="Cuenta principal"
                 )
             with fila_1[1]:
-                tipo = st.selectbox("Tipo", [str(valor) for valor in TipoPatrimonio])
+                cuenta_ligada = st.selectbox(
+                    "Cuenta del catálogo",
+                    list(opciones_cuenta),
+                    help="Sólo aparecen las cuentas que aún no están en el balance.",
+                )
             with fila_1[2]:
-                subtipo = st.selectbox("Subtipo", SUBTIPOS)
+                tipo = st.selectbox("Tipo", [str(valor) for valor in TipoPatrimonio])
             with fila_1[3]:
-                liquidez = st.selectbox("Liquidez", [str(valor) for valor in Liquidez])
+                subtipo = st.selectbox("Subtipo", SUBTIPOS)
 
-            fila_2 = st.columns(4)
+            fila_2 = st.columns(5)
 
             with fila_2[0]:
                 saldo = st.number_input(
                     "Saldo actual", min_value=0.0, step=500.0, format="%.2f"
                 )
             with fila_2[1]:
-                institucion = st.text_input("Institución", placeholder="Banco")
+                liquidez = st.selectbox("Liquidez", [str(valor) for valor in Liquidez])
             with fila_2[2]:
+                institucion = st.text_input("Institución", placeholder="Banco")
+            with fila_2[3]:
                 tasa = st.number_input(
                     "Tasa anual",
                     min_value=0.0,
@@ -200,7 +248,7 @@ with balance_tab:
                     format="%.4f",
                     help="En proporción: 0.07 equivale a 7%.",
                 )
-            with fila_2[3]:
+            with fila_2[4]:
                 fecha_corte = st.date_input(
                     "Fecha de corte", value=date.today(), format="DD/MM/YYYY"
                 )
@@ -215,6 +263,7 @@ with balance_tab:
                         nombre=nombre,
                         tipo=tipo,
                         saldo=saldo,
+                        cuenta_id=opciones_cuenta[cuenta_ligada],
                         subtipo=subtipo,
                         institucion=institucion,
                         liquidez=liquidez,
@@ -228,6 +277,78 @@ with balance_tab:
                     invalidar_datos()
                     st.success(f"«{nombre}» agregada.", icon=":material/check_circle:")
                     st.rerun()
+
+
+# ═══════════════════════════════════════════════════════════
+# Adeudos generados
+#
+# Lo que ya se gastó y no se ha pagado. No es una posición
+# capturada sino la suma de los movimientos devengados, así
+# que se lee aquí y se liquida en Movimientos.
+# ═══════════════════════════════════════════════════════════
+
+with adeudos_tab:
+    if por_pagar.empty:
+        st.success(
+            "No debes nada: todo lo que gastaste ya está pagado.",
+            icon=":material/check_circle:",
+        )
+    else:
+        with st.container(horizontal=True):
+            st.metric("Total por pagar", moneda(adeudo), border=True)
+            st.metric("Movimientos", len(por_pagar), border=True)
+            st.metric(
+                "El más antiguo",
+                f"{int(por_pagar['dias_pendiente'].max())} días",
+                border=True,
+            )
+
+        with st.container(border=True):
+            st.subheader("Lo que debes")
+            st.caption(
+                "Estos gastos ya pesan en el presupuesto de su mes, pero no "
+                "han salido de la caja. Márcalos como pagados desde "
+                "**Movimientos** cuando los liquides."
+            )
+            st.dataframe(
+                por_pagar,
+                hide_index=True,
+                column_config={
+                    "id": st.column_config.NumberColumn("ID", width="small"),
+                    "fecha": st.column_config.DateColumn(
+                        "Fecha del gasto", format="DD/MM/YYYY"
+                    ),
+                    "periodo": None,
+                    "cuenta_id": None,
+                    "monto": st.column_config.NumberColumn("Monto", format="$%.2f"),
+                    "descripcion": st.column_config.TextColumn(
+                        "Descripción", width="medium"
+                    ),
+                    "categoria": st.column_config.TextColumn("Categoría"),
+                    "cuenta": st.column_config.TextColumn("Cuenta"),
+                    "dias_pendiente": st.column_config.NumberColumn(
+                        "Días pendiente", format="%d"
+                    ),
+                },
+            )
+
+        por_categoria = (
+            por_pagar.groupby("categoria", as_index=False)["monto"]
+            .sum()
+            .sort_values("monto", ascending=False)
+        )
+        if len(por_categoria) > 1:
+            with st.container(border=True):
+                st.subheader("Adeudo por categoría")
+                st.altair_chart(
+                    grafico_barras(
+                        por_categoria,
+                        dimension="categoria",
+                        medida="monto",
+                        titulo_dimension="Categoría",
+                        titulo_medida="Por pagar",
+                    )
+                )
 
 
 # ═══════════════════════════════════════════════════════════

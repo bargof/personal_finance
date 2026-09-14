@@ -193,14 +193,25 @@ def _importar_movimientos(
 
         resultado.catalogos_creados += catalogo.creados
 
+        # El estado y la fecha vuelven a pasarse al final, para el CASE que
+        # decide la fecha de pago.
+        registros = [(*registro, registro[15], registro[0]) for registro in registros]
+
         if registros:
             conexion.executemany(
                 """
                 INSERT INTO movimientos (
                     fecha, tipo, monto, categoria_id, subcategoria_id, cuenta_id,
                     medio_pago_id, descripcion, necesidad, naturaleza, recurrente,
-                    planeado, proyecto, etiquetas, nota, estado
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    planeado, proyecto, etiquetas, nota, estado, fecha_pago
+                )
+                -- El Excel de origen no distinguía devengado de pagado: lo
+                -- confirmado ya había salido de la caja. Dejar la fecha de
+                -- pago nula convertiría todo el histórico en adeudos.
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    CASE WHEN ? = 'Confirmado' THEN ? END
+                )
                 """,
                 registros,
             )

@@ -4,6 +4,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 
+from finanzas.data.repositories.catalogos_repository import CatalogosRepository
 from finanzas.data.repositories.suscripciones_repository import SuscripcionesRepository
 from finanzas.domain.entities import Suscripcion
 from finanzas.domain.enums import FrecuenciaCobro, Necesidad
@@ -16,8 +17,13 @@ from finanzas.domain.enums import FrecuenciaCobro, Necesidad
 class SuscripcionesService:
     """Casos de uso sobre el gasto recurrente por suscripción."""
 
-    def __init__(self, repositorio: SuscripcionesRepository | None = None) -> None:
+    def __init__(
+        self,
+        repositorio: SuscripcionesRepository | None = None,
+        catalogos: CatalogosRepository | None = None,
+    ) -> None:
         self._repo = repositorio or SuscripcionesRepository()
+        self._catalogos = catalogos or CatalogosRepository()
 
     def listar(self, solo_activas: bool = False) -> pd.DataFrame:
         """Devuelve las suscripciones con costo mensual y anual calculados."""
@@ -71,18 +77,29 @@ class SuscripcionesService:
         costo_por_cobro: float,
         frecuencia: str = FrecuenciaCobro.MENSUAL,
         categoria_id: int | None = None,
+        subcategoria_id: int | None = None,
         cuenta_id: int | None = None,
         proximo_cobro: date | None = None,
         renovacion_automatica: bool = True,
         necesidad: str = Necesidad.DESEO,
         notas: str = "",
     ) -> int:
-        """Da de alta una suscripción."""
+        """
+        Da de alta una suscripción.
+
+        Raises
+        ------
+        ValueError
+            Si la subcategoría no cuelga de la categoría indicada.
+        """
+        self._validar_clasificacion(categoria_id, subcategoria_id)
+
         suscripcion = Suscripcion(
             servicio=_validar_servicio(servicio),
             costo_por_cobro=_validar_costo(costo_por_cobro),
             frecuencia=FrecuenciaCobro(frecuencia),
             categoria_id=categoria_id,
+            subcategoria_id=subcategoria_id,
             cuenta_id=cuenta_id,
             proximo_cobro=proximo_cobro,
             renovacion_automatica=renovacion_automatica,
@@ -107,6 +124,7 @@ class SuscripcionesService:
             costo_por_cobro=float(actual["costo_por_cobro"]),
             frecuencia=FrecuenciaCobro(actual["frecuencia"]),
             categoria_id=_entero_o_nulo(actual["categoria_id"]),
+            subcategoria_id=_entero_o_nulo(actual["subcategoria_id"]),
             cuenta_id=_entero_o_nulo(actual["cuenta_id"]),
             proximo_cobro=proximo.date() if pd.notna(proximo) else None,
             renovacion_automatica=bool(actual["renovacion_automatica"]),
@@ -122,8 +140,23 @@ class SuscripcionesService:
 
         suscripcion.servicio = _validar_servicio(suscripcion.servicio)
         suscripcion.costo_por_cobro = _validar_costo(suscripcion.costo_por_cobro)
+        self._validar_clasificacion(
+            suscripcion.categoria_id, suscripcion.subcategoria_id
+        )
 
         self._repo.actualizar(suscripcion_id, suscripcion)
+
+    def _validar_clasificacion(
+        self, categoria_id: int | None, subcategoria_id: int | None
+    ) -> None:
+        """Exige que la subcategoría cuelgue de la categoría elegida."""
+        if self._catalogos.subcategoria_pertenece_a(subcategoria_id, categoria_id):
+            return
+
+        raise ValueError(
+            "La subcategoría elegida no pertenece a esa categoría. "
+            "Elige una subcategoría de la misma categoría o déjala vacía."
+        )
 
     def cambiar_estado(self, suscripcion_id: int, activa: bool) -> None:
         """Da de alta o de baja una suscripción sin perder su historial."""

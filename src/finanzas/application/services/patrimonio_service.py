@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import date
 
 import pandas as pd
@@ -12,6 +13,10 @@ from finanzas.domain.enums import Liquidez, TipoPatrimonio
 # ═══════════════════════════════════════════════════════════
 # Patrimonio y cierres mensuales
 # ═══════════════════════════════════════════════════════════
+
+
+class CuentaYaEnBalanceError(ValueError):
+    """La cuenta ya tiene una posición en el balance."""
 
 
 class PatrimonioService:
@@ -36,17 +41,11 @@ class PatrimonioService:
         if df.empty:
             return df
 
-        df = validar_patrimonio(df)
-        df["aporte_a_patrimonio"] = df.apply(
-            lambda fila: (
-                fila["saldo"]
-                if fila["tipo"] == TipoPatrimonio.ACTIVO
-                else -fila["saldo"]
-            ),
-            axis=1,
-        )
+        return validar_patrimonio(df)
 
-        return df
+    def cuentas_sin_posicion(self) -> pd.DataFrame:
+        """Devuelve las cuentas activas que aún no tienen saldo en el balance."""
+        return self._repo.cuentas_sin_posicion()
 
     def resumen(self) -> dict[str, float]:
         """Devuelve activos, pasivos y patrimonio neto."""
@@ -77,6 +76,7 @@ class PatrimonioService:
         nombre: str,
         tipo: str,
         saldo: float,
+        cuenta_id: int | None = None,
         subtipo: str = "",
         institucion: str = "",
         liquidez: str = Liquidez.NO_APLICA,
@@ -85,11 +85,20 @@ class PatrimonioService:
         moneda: str = "MXN",
         notas: str = "",
     ) -> int:
-        """Da de alta una posición patrimonial."""
+        """
+        Da de alta una posición patrimonial.
+
+        Raises
+        ------
+        CuentaYaEnBalanceError
+            Si la cuenta indicada ya tiene una posición: su saldo se
+            actualiza, no se duplica.
+        """
         posicion = PosicionPatrimonial(
             nombre=_validar_nombre(nombre),
             tipo=TipoPatrimonio(tipo),
             saldo=_validar_saldo(saldo),
+            cuenta_id=cuenta_id,
             subtipo=subtipo,
             institucion=institucion,
             liquidez=Liquidez(liquidez),
@@ -99,7 +108,13 @@ class PatrimonioService:
             notas=notas,
         )
 
-        return self._repo.crear(posicion)
+        try:
+            return self._repo.crear(posicion)
+        except sqlite3.IntegrityError as error:
+            raise CuentaYaEnBalanceError(
+                f"«{nombre}» ya está en el balance ligada a esa cuenta. "
+                "Actualiza su saldo en vez de agregarla de nuevo."
+            ) from error
 
     def actualizar_saldo(self, posicion_id: int, saldo: float) -> None:
         """
@@ -117,6 +132,7 @@ class PatrimonioService:
             nombre=actual["nombre"],
             tipo=TipoPatrimonio(actual["tipo"]),
             saldo=_validar_saldo(saldo),
+            cuenta_id=_entero_o_nulo(actual["cuenta_id"]),
             subtipo=actual["subtipo"],
             institucion=actual["institucion"],
             liquidez=Liquidez(actual["liquidez"]),
@@ -177,6 +193,13 @@ def _validar_nombre(nombre: str) -> str:
         raise ValueError("La posición necesita un nombre.")
 
     return limpio
+
+
+def _entero_o_nulo(valor: object) -> int | None:
+    """Convierte a int cuidando los nulos que llegan desde pandas."""
+    if valor is None or pd.isna(valor):
+        return None
+    return int(valor)
 
 
 def _validar_saldo(saldo: float) -> float:

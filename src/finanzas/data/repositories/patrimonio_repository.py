@@ -13,6 +13,7 @@ from finanzas.domain.entities import CierreMensual, PosicionPatrimonial
 _CAMPOS_POSICION = (
     "nombre",
     "tipo",
+    "cuenta_id",
     "subtipo",
     "institucion",
     "saldo",
@@ -42,10 +43,15 @@ class PatrimonioRepository:
     # ── Posiciones ───────────────────────────────────────
 
     def listar(self) -> pd.DataFrame:
-        """Devuelve activos y pasivos ordenados por lado del balance y saldo."""
+        """
+        Devuelve activos y pasivos ordenados por lado del balance y saldo.
+
+        Lee `v_patrimonio`, que añade el nombre de la cuenta ligada y el
+        aporte con signo al patrimonio neto.
+        """
         with connect(self._db_path) as conexion:
             df = pd.read_sql_query(
-                "SELECT * FROM patrimonio ORDER BY tipo, saldo DESC", conexion
+                "SELECT * FROM v_patrimonio ORDER BY tipo, saldo DESC", conexion
             )
 
         if not df.empty:
@@ -53,17 +59,41 @@ class PatrimonioRepository:
 
         return df
 
+    def cuentas_sin_posicion(self) -> pd.DataFrame:
+        """
+        Devuelve las cuentas activas que aún no tienen saldo en el balance.
+
+        Es el pendiente que impide que el estado de situación financiera
+        esté incompleto sin avisar.
+        """
+        with connect(self._db_path) as conexion:
+            return pd.read_sql_query(
+                "SELECT * FROM v_cuentas_sin_posicion ORDER BY nombre", conexion
+            )
+
     def resumen(self) -> dict[str, float]:
-        """Devuelve activos, pasivos y patrimonio neto."""
+        """
+        Devuelve activos, pasivos y patrimonio neto.
+
+        Los pasivos incluyen los adeudos generados —lo gastado que aún no
+        se paga—, que se reportan aparte en `por_pagar` porque no son una
+        posición capturada sino la suma de los movimientos devengados.
+        """
         with connect(self._db_path) as conexion:
             fila = conexion.execute("SELECT * FROM v_patrimonio_neto").fetchone()
 
         if fila is None or fila["patrimonio_neto"] is None:
-            return {"activos": 0.0, "pasivos": 0.0, "patrimonio_neto": 0.0}
+            return {
+                "activos": 0.0,
+                "pasivos": 0.0,
+                "por_pagar": 0.0,
+                "patrimonio_neto": 0.0,
+            }
 
         return {
             "activos": float(fila["activos"]),
             "pasivos": float(fila["pasivos"]),
+            "por_pagar": float(fila["por_pagar"]),
             "patrimonio_neto": float(fila["patrimonio_neto"]),
         }
 
@@ -195,6 +225,7 @@ def _a_valores_posicion(posicion: PosicionPatrimonial) -> list[object]:
     return [
         posicion.nombre.strip(),
         str(posicion.tipo),
+        posicion.cuenta_id,
         posicion.subtipo.strip(),
         posicion.institucion.strip(),
         float(posicion.saldo),

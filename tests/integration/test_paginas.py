@@ -24,8 +24,11 @@ APP_DIR = (
 PAGINAS = (
     "streamlit_app.py",
     "app_pages/movimientos.py",
+    "app_pages/importar.py",
     "app_pages/presupuesto.py",
     "app_pages/metas.py",
+    "app_pages/proyectos.py",
+    "app_pages/deseos.py",
     "app_pages/patrimonio.py",
     "app_pages/suscripciones.py",
     "app_pages/analisis.py",

@@ -15,6 +15,7 @@ from finanzas.application.app.components import (
     tabla_equivalente,
     version_datos,
 )
+from finanzas.application.app.theme import rotulo
 
 # ═══════════════════════════════════════════════════════════
 # Dashboard: el estado del periodo en una pantalla
@@ -35,6 +36,8 @@ if not tablero.hay_datos:
 resumen = tablero.resumen
 
 # ── Primera fila de indicadores ──────────────────────────
+
+rotulo("Resultado del periodo")
 
 tendencia = tablero.tendencia
 serie_ingresos = tendencia["ingresos"].tolist()
@@ -78,6 +81,8 @@ with st.container(horizontal=True):
 
 # ── Segunda fila ─────────────────────────────────────────
 
+rotulo("Salud financiera")
+
 meta_meses = reglas.meses_fondo_emergencia
 
 with st.container(horizontal=True):
@@ -117,6 +122,8 @@ with st.container(horizontal=True):
     )
 
 # ── Tendencia y composición del gasto ────────────────────
+
+rotulo("Evolución")
 
 izquierda, derecha = st.columns([3, 2])
 
@@ -164,6 +171,8 @@ with derecha:
             )
 
 # ── Presupuesto y lectura rápida ─────────────────────────
+
+rotulo("Control")
 
 izquierda, derecha = st.columns([3, 2])
 
@@ -248,6 +257,8 @@ with derecha:
             )
 
 # ── Últimos movimientos ──────────────────────────────────
+
+rotulo("Actividad reciente")
 
 with st.container(border=True):
     st.subheader("Últimos movimientos del periodo")

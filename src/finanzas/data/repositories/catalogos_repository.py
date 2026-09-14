@@ -117,6 +117,29 @@ class CatalogosRepository:
             )
             return int(cursor.lastrowid)
 
+    def subcategoria_pertenece_a(
+        self, subcategoria_id: int | None, categoria_id: int | None
+    ) -> bool:
+        """
+        Indica si la subcategoría cuelga de esa categoría.
+
+        El esquema no lo puede garantizar: `movimientos` y `suscripciones`
+        guardan las dos claves por separado, y SQLite no tiene forma de
+        exigir que concuerden. La coherencia se valida aquí.
+        """
+        if subcategoria_id is None:
+            return True
+        if categoria_id is None:
+            return False
+
+        with connect(self._db_path) as conexion:
+            fila = conexion.execute(
+                "SELECT 1 FROM subcategorias WHERE id = ? AND categoria_id = ?",
+                (subcategoria_id, categoria_id),
+            ).fetchone()
+
+        return fila is not None
+
     def eliminar_subcategoria(self, subcategoria_id: int) -> None:
         """Elimina una subcategoría y desliga los movimientos que la usaban."""
         with connect(self._db_path) as conexion:

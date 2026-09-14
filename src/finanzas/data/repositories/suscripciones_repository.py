@@ -15,6 +15,7 @@ from finanzas.domain.enums import COBROS_POR_ANIO
 _CAMPOS_ESCRITURA = (
     "servicio",
     "categoria_id",
+    "subcategoria_id",
     "costo_por_cobro",
     "frecuencia",
     "proximo_cobro",
@@ -45,11 +46,13 @@ class SuscripcionesRepository:
         consulta = f"""
             SELECT
                 s.*,
-                COALESCE(c.nombre, '')  AS categoria,
-                COALESCE(cu.nombre, '') AS cuenta
+                COALESCE(c.nombre, '')   AS categoria,
+                COALESCE(sub.nombre, '') AS subcategoria,
+                COALESCE(cu.nombre, '')  AS cuenta
             FROM suscripciones s
-            LEFT JOIN categorias c  ON c.id  = s.categoria_id
-            LEFT JOIN cuentas    cu ON cu.id = s.cuenta_id
+            LEFT JOIN categorias    c   ON c.id   = s.categoria_id
+            LEFT JOIN subcategorias sub ON sub.id = s.subcategoria_id
+            LEFT JOIN cuentas       cu  ON cu.id  = s.cuenta_id
             {filtro}
             ORDER BY s.activa DESC, s.servicio
         """
@@ -121,6 +124,7 @@ def _a_valores(suscripcion: Suscripcion) -> list[object]:
     return [
         suscripcion.servicio.strip(),
         suscripcion.categoria_id,
+        suscripcion.subcategoria_id,
         float(suscripcion.costo_por_cobro),
         str(suscripcion.frecuencia),
         suscripcion.proximo_cobro.isoformat() if suscripcion.proximo_cobro else None,

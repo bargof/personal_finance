@@ -69,9 +69,11 @@ else:
             column_config={
                 "id": None,
                 "categoria_id": None,
+                "subcategoria_id": None,
                 "cuenta_id": None,
                 "servicio": st.column_config.TextColumn("Servicio", pinned=True),
                 "categoria": st.column_config.TextColumn("Categoría"),
+                "subcategoria": st.column_config.TextColumn("Subcategoría"),
                 "costo_por_cobro": st.column_config.NumberColumn(
                     "Costo por cobro", format="$%.2f"
                 ),
@@ -210,6 +212,24 @@ with st.container(border=True):
         fila.nombre: int(fila.id) for fila in catalogos["cuentas"].itertuples()
     }
 
+    # La categoría vive fuera del formulario para que el selector de
+    # subcategoría se repueble al cambiarla: dentro de un `st.form` el
+    # rerun se posterga hasta el submit.
+    fila_clasificacion = st.columns(2)
+
+    with fila_clasificacion[0]:
+        categoria = st.selectbox("Categoría", list(opciones_categoria))
+    categoria_id = opciones_categoria[categoria]
+
+    with fila_clasificacion[1]:
+        subcategorias = catalogos["subcategorias"]
+        propias = subcategorias[subcategorias["categoria_id"] == categoria_id]
+        opciones_sub = {"— sin subcategoría —": None} | {
+            fila.nombre: int(fila.id) for fila in propias.itertuples()
+        }
+        subcategoria = st.selectbox("Subcategoría", list(opciones_sub))
+    subcategoria_id = opciones_sub[subcategoria]
+
     with st.form("nueva_suscripcion", clear_on_submit=True, border=False):
         fila_1 = st.columns([2, 1, 1, 1])
 
@@ -228,19 +248,17 @@ with st.container(border=True):
                 "Necesidad", [str(valor) for valor in Necesidad], index=1
             )
 
-        fila_2 = st.columns(4)
+        fila_2 = st.columns(3)
 
         with fila_2[0]:
-            categoria = st.selectbox("Categoría", list(opciones_categoria))
-        with fila_2[1]:
             cuenta = st.selectbox("Cuenta de cobro", list(opciones_cuenta))
-        with fila_2[2]:
+        with fila_2[1]:
             proximo_cobro = st.date_input(
                 "Próximo cobro",
                 value=date.today() + timedelta(days=30),
                 format="DD/MM/YYYY",
             )
-        with fila_2[3]:
+        with fila_2[2]:
             renovacion = st.checkbox("Renovación automática", value=True)
 
         notas = st.text_input("Notas")
@@ -253,7 +271,8 @@ with st.container(border=True):
                     servicio=servicio,
                     costo_por_cobro=costo,
                     frecuencia=frecuencia,
-                    categoria_id=opciones_categoria[categoria],
+                    categoria_id=categoria_id,
+                    subcategoria_id=subcategoria_id,
                     cuenta_id=opciones_cuenta[cuenta],
                     proximo_cobro=proximo_cobro,
                     renovacion_automatica=renovacion,

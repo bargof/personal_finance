@@ -3,9 +3,132 @@
 # torch; aquí no hay nada que lo justifique y el ciclo de trabajo mejora.
 fileWatcherType = "auto"
 
+# ═══════════════════════════════════════════════════════════
+# Tema
+#
+# Arranca en oscuro. Lo que va en [theme] es lo que no depende
+# de la luz —tipografía, radios, densidad— y lo heredan tanto
+# [theme.dark] como [theme.light], que sólo aportan color.
+#
+# La forma hace el trabajo que aquí no hace el color: esquinas
+# suaves, un borde de bajo contraste y aire entre bloques. El
+# acento se reserva para lo accionable, así que cuando aparece
+# significa algo.
+# ═══════════════════════════════════════════════════════════
+
 [theme]
-base = "light"
+base = "dark"
+
+# Inter si hay red; si no, la del sistema, que en macOS es SF Pro.
+# El fallback importa: la app tiene que verse bien sin conexión.
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap, -apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif"
+headingFont = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap, -apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif"
+codeFont = "ui-monospace, SFMono-Regular, Menlo, monospace"
+
+# 15px en vez de 16 y títulos bastante más chicos que los de Streamlit:
+# la pantalla es un tablero, no una portada. Cabe más sin apretar.
+baseFontSize = 15
+headingFontSizes = ["1.85rem", "1.35rem", "1.1rem", "0.95rem", "0.85rem", "0.8rem"]
+headingFontWeights = [650, 600, 600, 600, 600, 600]
+
+baseRadius = "0.7rem"
+buttonRadius = "0.5rem"
+showWidgetBorder = true
+showSidebarBorder = false
+linkUnderline = false
+
+metricValueFontSize = "1.75rem"
+metricValueFontWeight = 600
+
+# ── Oscuro ───────────────────────────────────────────────
+#
+# Carbón neutro, no negro puro: el negro absoluto contra texto
+# claro vibra y cansa. Las superficies suben un escalón de luz
+# en vez de marcarse con línea.
+
+[theme.dark]
+backgroundColor = "#0f1216"
+secondaryBackgroundColor = "#171c23"
+textColor = "#e6e9ee"
+borderColor = "#242b35"
+# Vino neón: el matiz del tinto (≈343°) a saturación casi plena pero
+# oscuro de verdad, que es lo que lo separa del rosa. Puede permitírselo
+# porque el halo de `theme.py` lo sostiene: en un neón real el tubo es de
+# color profundo y lo brillante es la luz que emite, así que el relleno va
+# oscuro y el resplandor, encendido.
+# El enlace va aparte porque es texto sobre carbón y necesita más
+# contraste que un relleno.
+primaryColor = "#d40b45"
+linkColor = "#ff5c85"
+
+codeBackgroundColor = "#12161c"
+codeTextColor = "#c8d3e0"
+dataframeHeaderBackgroundColor = "#171c23"
+dataframeBorderColor = "#242b35"
+
+# Series de los gráficos, en el orden en que se asignan.
+chartCategoricalColors = [
+    "#e8134e",
+    "#f0883e",
+    "#4fd1c5",
+    "#b892f6",
+    "#e3b341",
+    "#7aa2f7",
+]
+
+# Colores de estado de los mensajes, subidos de luz para que
+# contrasten contra el carbón.
+greenColor = "#3fb950"
+greenBackgroundColor = "#15251a"
+greenTextColor = "#7ee094"
+redColor = "#f85149"
+redBackgroundColor = "#2a1618"
+redTextColor = "#ff9d96"
+yellowColor = "#e3b341"
+yellowBackgroundColor = "#26200f"
+yellowTextColor = "#f0cd72"
+blueColor = "#7aa2f7"
+blueBackgroundColor = "#141d2c"
+blueTextColor = "#9cc5ff"
+grayColor = "#8b949e"
+grayBackgroundColor = "#1a1f26"
+grayTextColor = "#aab3bf"
+
+[theme.dark.sidebar]
+# Un escalón más oscura que el contenido: separa sin necesitar línea.
+backgroundColor = "#0b0e12"
+secondaryBackgroundColor = "#151a21"
+borderColor = "#1e242c"
+primaryColor = "#d40b45"
+
+# ── Claro ────────────────────────────────────────────────
+#
+# Se conserva por si se alterna el tema desde el menú; es la
+# paleta original, alineada a los mismos radios y densidad.
+
+[theme.light]
 backgroundColor = "#fcfcfb"
-secondaryBackgroundColor = "#f0efec"
-textColor = "#0b0b0b"
-primaryColor = "#2a78d6"
+secondaryBackgroundColor = "#f2f1ee"
+textColor = "#14161a"
+borderColor = "#e2e0da"
+primaryColor = "#b00840"
+linkColor = "#9c0739"
+
+codeBackgroundColor = "#f2f1ee"
+dataframeHeaderBackgroundColor = "#f2f1ee"
+dataframeBorderColor = "#e2e0da"
+
+chartCategoricalColors = [
+    "#b00840",
+    "#eb6834",
+    "#1baf7a",
+    "#8b5cf6",
+    "#d99b12",
+    "#2a78d6",
+]
+
+[theme.light.sidebar]
+backgroundColor = "#f6f5f2"
+secondaryBackgroundColor = "#eceae5"
+borderColor = "#e2e0da"
+primaryColor = "#b00840"

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from finanzas.config.settings import settings
-from finanzas.data.database import connect, init_database
+from finanzas.data.database import connect, init_database, tabla_vacia
 from finanzas.data.repositories.catalogos_repository import CatalogosRepository
 from finanzas.domain.entities import ReglasFinancieras
 
@@ -73,8 +73,12 @@ def sembrar_catalogos(db_path: str | None = None) -> dict[str, int]:
     """
     Inserta los catálogos base si aún no existen.
 
-    Es idempotente: los nombres son únicos, así que volver a ejecutarlo
-    no duplica nada ni pisa lo que el usuario haya editado.
+    Es idempotente en filas y también en ids. La distinción importa: con
+    `INSERT ... ON CONFLICT DO NOTHING` sobre una tabla `AUTOINCREMENT`,
+    SQLite reserva el siguiente id *antes* de detectar el conflicto de
+    `UNIQUE` y el `DO NOTHING` no lo devuelve, así que cada corrida
+    quemaba un id por cada fila que ya existía. `WHERE NOT EXISTS` no
+    llega a intentar el insert, y el contador queda intacto.
 
     Returns
     -------
@@ -87,10 +91,11 @@ def sembrar_catalogos(db_path: str | None = None) -> dict[str, int]:
         for orden, (categoria, tipo, subcategorias) in enumerate(CATEGORIAS_BASE):
             cursor = conexion.execute(
                 """
-                INSERT INTO categorias (nombre, tipo, orden) VALUES (?, ?, ?)
-                ON CONFLICT(nombre) DO NOTHING
+                INSERT INTO categorias (nombre, tipo, orden)
+                SELECT ?, ?, ?
+                WHERE NOT EXISTS (SELECT 1 FROM categorias WHERE nombre = ?)
                 """,
-                (categoria, tipo, orden),
+                (categoria, tipo, orden, categoria),
             )
             insertados["categorias"] += cursor.rowcount
 
@@ -101,28 +106,36 @@ def sembrar_catalogos(db_path: str | None = None) -> dict[str, int]:
             for subcategoria in subcategorias:
                 cursor = conexion.execute(
                     """
-                    INSERT INTO subcategorias (categoria_id, nombre) VALUES (?, ?)
-                    ON CONFLICT(categoria_id, nombre) DO NOTHING
+                    INSERT INTO subcategorias (categoria_id, nombre)
+                    SELECT ?, ?
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM subcategorias
+                        WHERE categoria_id = ? AND nombre = ?
+                    )
                     """,
-                    (categoria_id, subcategoria),
+                    (categoria_id, subcategoria, categoria_id, subcategoria),
                 )
                 insertados["subcategorias"] += cursor.rowcount
 
         for cuenta, tipo_cuenta in CUENTAS_BASE:
             cursor = conexion.execute(
                 """
-                INSERT INTO cuentas (nombre, tipo) VALUES (?, ?)
-                ON CONFLICT(nombre) DO NOTHING
+                INSERT INTO cuentas (nombre, tipo)
+                SELECT ?, ?
+                WHERE NOT EXISTS (SELECT 1 FROM cuentas WHERE nombre = ?)
                 """,
-                (cuenta, tipo_cuenta),
+                (cuenta, tipo_cuenta, cuenta),
             )
             insertados["cuentas"] += cursor.rowcount
 
         for medio in MEDIOS_PAGO_BASE:
             cursor = conexion.execute(
-                "INSERT INTO medios_pago (nombre) VALUES (?) "
-                "ON CONFLICT(nombre) DO NOTHING",
-                (medio,),
+                """
+                INSERT INTO medios_pago (nombre)
+                SELECT ?
+                WHERE NOT EXISTS (SELECT 1 FROM medios_pago WHERE nombre = ?)
+                """,
+                (medio, medio),
             )
             insertados["medios_pago"] += cursor.rowcount
 
@@ -162,7 +175,16 @@ def preparar_base(db_path: str | None = None) -> None:
 
     Se llama al arrancar la aplicación, de modo que un archivo borrado o
     un clon recién bajado del repositorio funcionen sin pasos manuales.
+
+    Los catálogos se siembran sólo cuando están vacíos. Sembrar en cada
+    arranque resucitaba las categorías base que el usuario había borrado
+    a propósito, y los catálogos son suyos en cuanto los toca.
     """
     init_database(db_path)
-    sembrar_catalogos(db_path)
+
+    if tabla_vacia("categorias", db_path):
+        sembrar_catalogos(db_path)
+    else:
+        logger.debug("Catálogos ya poblados: se omite la siembra")
+
     sembrar_reglas(db_path)

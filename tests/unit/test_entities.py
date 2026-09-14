@@ -29,7 +29,14 @@ from finanzas.domain.enums import (
 
 
 def _movimiento(tipo: TipoMovimiento, **extras) -> Movimiento:
-    """Arma un movimiento mínimo del tipo indicado."""
+    """
+    Arma un movimiento mínimo del tipo indicado, ya pagado.
+
+    La fecha de pago va explícita porque sin ella el movimiento sería un
+    devengado y no movería caja. El caso devengado tiene sus propias
+    pruebas en `tests/integration/test_devengado.py`.
+    """
+    extras.setdefault("fecha_pago", date(2026, 8, 15))
     return Movimiento(
         fecha=date(2026, 8, 15),
         tipo=tipo,
@@ -65,7 +72,13 @@ def test_transferencia_no_es_ingreso_ni_gasto():
 
 
 def test_gasto_pendiente_no_cuenta_como_gasto_real():
-    """Sólo lo confirmado alimenta presupuesto e indicadores."""
+    """
+    Sólo lo confirmado alimenta presupuesto e indicadores.
+
+    La caja sí se mueve si el movimiento tiene fecha de pago: `estado`
+    dice si el gasto ocurrió y `fecha_pago` si el dinero salió, y son
+    preguntas independientes.
+    """
     pendiente = _movimiento(TipoMovimiento.GASTO, estado=EstadoMovimiento.PENDIENTE)
 
     assert pendiente.gasto_real == 0.0

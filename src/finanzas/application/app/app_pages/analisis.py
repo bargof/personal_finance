@@ -33,8 +33,8 @@ if not tablero.hay_datos:
 movimientos = tablero.movimientos
 reglas = tablero.reglas
 
-mezcla_tab, detalle_tab, calendario_tab, fugas_tab = st.tabs(
-    ["Mezcla del gasto", "Detalle", "Calendario", "Fugas"]
+mezcla_tab, detalle_tab, proyectos_tab, calendario_tab, fugas_tab = st.tabs(
+    ["Mezcla del gasto", "Detalle", "Proyectos", "Calendario", "Fugas"]
 )
 
 
@@ -149,6 +149,123 @@ with detalle_tab:
                     "salidas": st.column_config.NumberColumn("Salidas", format="$%.2f"),
                     "flujo_neto": st.column_config.NumberColumn(
                         "Flujo neto", format="$%.2f"
+                    ),
+                },
+            )
+
+
+# ═══════════════════════════════════════════════════════════
+# Proyectos
+#
+# La categoría dice qué clase de gasto fue; el proyecto, para
+# qué esfuerzo se hizo. Un viaje cruza transporte, comida y
+# hospedaje, y sólo agrupándolo se sabe cuánto costó.
+#
+# A diferencia del resto de la página, no se limita al periodo
+# elegido: un proyecto dura lo que dura.
+# ═══════════════════════════════════════════════════════════
+
+with proyectos_tab:
+    proyectos = servicios.movimientos.proyectos()
+
+    if proyectos.empty:
+        st.info(
+            "Todavía no hay movimientos con proyecto. Asigna uno al capturar "
+            "en **Movimientos**, o desde el detalle de cualquier movimiento "
+            "ya registrado.",
+            icon=":material/info:",
+        )
+    else:
+        st.caption(
+            "Los proyectos cruzan categorías y periodos: aquí se suma todo su "
+            "historial, no sólo el mes seleccionado."
+        )
+
+        with st.container(horizontal=True):
+            st.metric("Proyectos", len(proyectos), border=True)
+            st.metric(
+                "Gasto acumulado",
+                moneda(float(proyectos["gasto"].sum())),
+                border=True,
+            )
+            deuda = float(proyectos["por_pagar"].sum())
+            if deuda:
+                st.metric(
+                    "Por pagar",
+                    moneda(deuda),
+                    border=True,
+                    help="Gasto de proyectos que aún no sale de la caja.",
+                )
+
+        with st.container(border=True):
+            st.subheader("Resumen por proyecto")
+            st.dataframe(
+                proyectos,
+                hide_index=True,
+                column_config={
+                    "proyecto": st.column_config.TextColumn("Proyecto", pinned=True),
+                    "movimientos": st.column_config.NumberColumn("Movs."),
+                    "desde": st.column_config.DateColumn("Desde", format="DD/MM/YYYY"),
+                    "hasta": st.column_config.DateColumn("Hasta", format="DD/MM/YYYY"),
+                    "gasto": st.column_config.NumberColumn("Gasto", format="$%.2f"),
+                    "ingreso": st.column_config.NumberColumn("Ingreso", format="$%.2f"),
+                    "ahorro_inversion": st.column_config.NumberColumn(
+                        "Ahorro e inversión", format="$%.2f"
+                    ),
+                    "por_pagar": st.column_config.NumberColumn(
+                        "Por pagar", format="$%.2f"
+                    ),
+                    "neto": st.column_config.NumberColumn(
+                        "Neto",
+                        format="$%.2f",
+                        help="Ingreso menos gasto del proyecto.",
+                    ),
+                },
+            )
+
+        con_gasto = proyectos[proyectos["gasto"] > 0]
+        if len(con_gasto) > 1:
+            with st.container(border=True):
+                st.subheader("Gasto por proyecto")
+                st.altair_chart(
+                    grafico_barras(
+                        con_gasto,
+                        dimension="proyecto",
+                        medida="gasto",
+                        titulo_dimension="Proyecto",
+                        titulo_medida="Gasto",
+                    )
+                )
+
+        with st.container(border=True):
+            st.subheader("Movimientos de un proyecto")
+            elegido = st.selectbox("Proyecto", proyectos["proyecto"].tolist())
+            detalle = servicios.movimientos.buscar(proyectos=[elegido])
+
+            st.dataframe(
+                detalle[
+                    [
+                        "fecha",
+                        "tipo",
+                        "categoria",
+                        "descripcion",
+                        "cuenta",
+                        "monto",
+                        "fecha_pago",
+                    ]
+                ],
+                hide_index=True,
+                column_config={
+                    "fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
+                    "tipo": st.column_config.TextColumn("Tipo"),
+                    "categoria": st.column_config.TextColumn("Categoría"),
+                    "descripcion": st.column_config.TextColumn(
+                        "Descripción", width="medium"
+                    ),
+                    "cuenta": st.column_config.TextColumn("Cuenta"),
+                    "monto": st.column_config.NumberColumn("Monto", format="$%.2f"),
+                    "fecha_pago": st.column_config.DateColumn(
+                        "Pagado el", format="DD/MM/YYYY"
                     ),
                 },
             )

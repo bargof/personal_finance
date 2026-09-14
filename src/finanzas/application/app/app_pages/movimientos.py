@@ -73,7 +73,12 @@ with registrar:
         fila_1 = st.columns([1, 2, 1])
 
         with fila_1[0]:
-            fecha = st.date_input("Fecha", value=date.today(), format="DD/MM/YYYY")
+            fecha = st.date_input(
+                "Fecha",
+                value=date.today(),
+                format="DD/MM/YYYY",
+                help="Cuándo ocurrió el gasto. Es la que manda en el presupuesto.",
+            )
 
         with fila_1[1]:
             tipo = st.segmented_control(
@@ -105,10 +110,49 @@ with registrar:
             subcategoria = st.selectbox("Subcategoría", list(opciones_sub))
             subcategoria_id = opciones_sub[subcategoria]
 
+        es_traspaso = tipo == str(TipoMovimiento.TRANSFERENCIA)
+
         with fila_2[2]:
             opciones_cuenta = _opciones(catalogos["cuentas"])
-            cuenta = st.selectbox("Cuenta", list(opciones_cuenta))
+            cuenta = st.selectbox(
+                "Cuenta de origen" if es_traspaso else "Cuenta",
+                list(opciones_cuenta),
+            )
             cuenta_id = opciones_cuenta[cuenta]
+
+        # Sólo un traspaso tiene dos patas; en lo demás el dinero entra o
+        # sale, no se mueve de un bolsillo propio a otro.
+        cuenta_destino_id = None
+        if es_traspaso:
+            destino = st.columns([1, 2])
+
+            with destino[0]:
+                otras = {
+                    nombre: identificador
+                    for nombre, identificador in opciones_cuenta.items()
+                    if identificador != cuenta_id
+                }
+                opciones_destino = {"— sin especificar —": None} | otras
+                cuenta_destino = st.selectbox(
+                    "Cuenta de destino",
+                    list(opciones_destino),
+                    help="A dónde llega el dinero que sale de la cuenta de origen.",
+                )
+                cuenta_destino_id = opciones_destino[cuenta_destino]
+
+            with destino[1]:
+                st.markdown("&nbsp;")
+                if cuenta_destino_id is None:
+                    st.warning(
+                        "Sin destino, el traspaso no dice dónde acabó el dinero.",
+                        icon=":material/help:",
+                    )
+                else:
+                    st.info(
+                        f"Sale de **{cuenta}** y entra a **{cuenta_destino}**. "
+                        "El traspaso no es gasto ni ingreso.",
+                        icon=":material/swap_horiz:",
+                    )
 
         descripcion = st.text_input(
             "Descripción", placeholder="Supermercado quincenal", key="mov_desc"
@@ -141,7 +185,22 @@ with registrar:
             fila_4 = st.columns(3)
 
             with fila_4[0]:
-                proyecto = st.text_input("Proyecto o persona", placeholder="Hogar")
+                # Un proyecto escrito a mano cada vez se convierte en varios
+                # proyectos por culpa de un acento o una mayúscula, así que
+                # los ya usados se ofrecen para reutilizar.
+                previos = servicios.movimientos.nombres_de_proyecto()
+                proyecto = st.selectbox(
+                    "Proyecto o persona",
+                    ["— ninguno —", *previos],
+                    accept_new_options=True,
+                    help=(
+                        "Agrupa movimientos de distintas categorías bajo un "
+                        "mismo esfuerzo: un viaje, una mudanza, una obra. "
+                        "Escribe uno nuevo para crearlo."
+                    ),
+                )
+                if proyecto == "— ninguno —":
+                    proyecto = ""
             with fila_4[1]:
                 etiquetas = st.text_input("Etiquetas", placeholder="despensa, quincena")
             with fila_4[2]:
@@ -159,6 +218,41 @@ with registrar:
             with banderas[1]:
                 planeado = st.checkbox("Estaba planeado", value=True)
 
+        # Fuera del expander de detalle: decidir si ya se pagó es parte de
+        # la captura normal, no un ajuste fino.
+        pago = st.columns([1, 1, 2])
+
+        with pago[0]:
+            ya_pagado = st.checkbox(
+                "Ya se pagó",
+                value=True,
+                key="mov_pagado",
+                help=(
+                    "Desmárcalo para registrar un adeudo generado: el gasto "
+                    "cuenta en el presupuesto de su fecha, pero no sale de la "
+                    "caja hasta que lo pagues."
+                ),
+            )
+
+        with pago[1]:
+            if ya_pagado:
+                fecha_pago = st.date_input(
+                    "Fecha de pago",
+                    value=fecha,
+                    format="DD/MM/YYYY",
+                    key="mov_fecha_pago",
+                )
+            else:
+                fecha_pago = None
+                st.markdown("&nbsp;")
+
+        with pago[2]:
+            if not ya_pagado:
+                st.info(
+                    "Queda como pendiente de pago y suma a tus adeudos.",
+                    icon=":material/schedule:",
+                )
+
         if st.button("Registrar movimiento", type="primary", icon=":material/add:"):
             try:
                 nuevo_id = servicios.movimientos.registrar(
@@ -168,6 +262,7 @@ with registrar:
                     categoria_id=categoria_id,
                     cuenta_id=cuenta_id,
                     subcategoria_id=subcategoria_id,
+                    cuenta_destino_id=cuenta_destino_id,
                     medio_pago_id=medio_pago_id,
                     descripcion=descripcion,
                     necesidad=necesidad or str(Necesidad.ESENCIAL),
@@ -178,13 +273,15 @@ with registrar:
                     etiquetas=etiquetas,
                     nota=nota,
                     estado=estado or str(EstadoMovimiento.CONFIRMADO),
+                    fecha_pago=fecha_pago,
                 )
             except ValueError as error:
                 reportar_error(error)
             else:
                 invalidar_datos()
+                sufijo = "" if fecha_pago else " · pendiente de pago"
                 st.success(
-                    f"Movimiento {nuevo_id} registrado por {moneda(monto)}.",
+                    f"Movimiento {nuevo_id} registrado por {moneda(monto)}{sufijo}.",
                     icon=":material/check_circle:",
                 )
 
@@ -232,6 +329,20 @@ with explorar:
                 "Buscar en descripción, etiquetas y notas", placeholder="café"
             )
 
+        filtros_3 = st.columns([3, 2])
+
+        with filtros_3[0]:
+            proyectos_filtro = st.multiselect(
+                "Proyecto", servicios.movimientos.nombres_de_proyecto()
+            )
+
+        with filtros_3[1]:
+            st.markdown("&nbsp;")
+            solo_por_pagar = st.checkbox(
+                "Sólo lo que debo",
+                help="Gastos ya incurridos que todavía no se han pagado.",
+            )
+
     desde, hasta = (
         rango if isinstance(rango, tuple) and len(rango) == 2 else (None, None)
     )
@@ -245,13 +356,15 @@ with explorar:
         estado=None if estado_filtro == "Todos" else estado_filtro,
         texto=texto or None,
         limite=500,
+        solo_por_pagar=solo_por_pagar,
+        proyectos=proyectos_filtro,
     )
 
     if movimientos.empty:
         st.info("Ningún movimiento coincide con los filtros.", icon=":material/info:")
         st.stop()
 
-    totales = st.columns(4)
+    totales = st.columns(5)
     totales[0].metric("Movimientos", len(movimientos), border=True)
     totales[1].metric(
         "Ingresos", moneda(movimientos["ingreso_real"].sum()), border=True
@@ -261,6 +374,15 @@ with explorar:
         "Ahorro e inversión",
         moneda(movimientos["patrimonio_creado"].sum()),
         border=True,
+    )
+    adeudo = float(movimientos["por_pagar"].sum())
+    totales[4].metric(
+        "Por pagar",
+        moneda(adeudo),
+        delta=f"{int((movimientos['por_pagar'] > 0).sum())} movimientos",
+        delta_color="off",
+        border=True,
+        help="Gasto ya incurrido que todavía no sale de la caja.",
     )
 
     seleccion = st.dataframe(
@@ -273,10 +395,14 @@ with explorar:
                 "subcategoria",
                 "descripcion",
                 "cuenta",
+                "cuenta_destino",
                 "medio_pago",
                 "monto",
                 "necesidad",
                 "estado",
+                "fecha_pago",
+                "proyecto",
+                "descripcion_banco",
             ]
         ],
         hide_index=True,
@@ -290,10 +416,28 @@ with explorar:
             "subcategoria": st.column_config.TextColumn("Subcategoría"),
             "descripcion": st.column_config.TextColumn("Descripción", width="medium"),
             "cuenta": st.column_config.TextColumn("Cuenta"),
+            "cuenta_destino": st.column_config.TextColumn(
+                "Destino", help="Sólo en traspasos: a dónde llegó el dinero."
+            ),
             "medio_pago": st.column_config.TextColumn("Medio de pago"),
             "monto": st.column_config.NumberColumn("Monto", format="$%.2f"),
             "necesidad": st.column_config.TextColumn("Necesidad"),
             "estado": st.column_config.TextColumn("Estado"),
+            "fecha_pago": st.column_config.DateColumn(
+                "Pagado el",
+                format="DD/MM/YYYY",
+                help="Vacío significa que el gasto sigue pendiente de pago.",
+            ),
+            "proyecto": st.column_config.TextColumn("Proyecto"),
+            "descripcion_banco": st.column_config.TextColumn(
+                "Concepto del banco",
+                width="medium",
+                help=(
+                    "Texto original del estado de cuenta. No se edita: "
+                    "sirve para casar el movimiento con su línea del "
+                    "documento."
+                ),
+            ),
         },
     )
 
@@ -310,15 +454,40 @@ with explorar:
         st.markdown(f"**{len(elegidos)} movimientos seleccionados**")
         st.caption(f"Suman {moneda(elegidos['monto'].sum())}.")
 
-        if st.button(
-            "Eliminar seleccionados", type="secondary", icon=":material/delete:"
-        ):
-            borrados = servicios.movimientos.eliminar_muchos(
-                [int(valor) for valor in elegidos["id"]]
+        deben = elegidos[elegidos["por_pagar"] > 0]
+        if not deben.empty:
+            st.caption(
+                f"{len(deben)} están pendientes de pago por "
+                f"{moneda(float(deben['por_pagar'].sum()))}."
             )
-            invalidar_datos()
-            st.success(f"{borrados} movimientos eliminados.", icon=":material/check:")
-            st.rerun()
+
+        lote = st.columns(2)
+
+        with lote[0]:
+            if not deben.empty and st.button(
+                "Marcar pagados hoy", type="primary", icon=":material/payments:"
+            ):
+                for identificador in deben["id"]:
+                    servicios.movimientos.marcar_pagado(int(identificador))
+                invalidar_datos()
+                st.success(
+                    f"{len(deben)} movimientos marcados como pagados.",
+                    icon=":material/check:",
+                )
+                st.rerun()
+
+        with lote[1]:
+            if st.button(
+                "Eliminar seleccionados", type="secondary", icon=":material/delete:"
+            ):
+                borrados = servicios.movimientos.eliminar_muchos(
+                    [int(valor) for valor in elegidos["id"]]
+                )
+                invalidar_datos()
+                st.success(
+                    f"{borrados} movimientos eliminados.", icon=":material/check:"
+                )
+                st.rerun()
 
         st.stop()
 
@@ -358,11 +527,59 @@ with explorar:
                 key=f"edit_estado_{movimiento_id}",
             )
 
+        pagado_actual = pd.notna(actual["fecha_pago"])
+        edicion_pago = st.columns([1, 1, 1])
+
+        with edicion_pago[0]:
+            sigue_pagado = st.checkbox(
+                "Ya se pagó",
+                value=bool(pagado_actual),
+                key=f"edit_pagado_{movimiento_id}",
+            )
+
+        with edicion_pago[1]:
+            if sigue_pagado:
+                nueva_fecha_pago = st.date_input(
+                    "Fecha de pago",
+                    value=actual["fecha_pago"].date()
+                    if pagado_actual
+                    else date.today(),
+                    format="DD/MM/YYYY",
+                    key=f"edit_fpago_{movimiento_id}",
+                )
+            else:
+                nueva_fecha_pago = None
+
+        with edicion_pago[2]:
+            if not sigue_pagado:
+                st.markdown("&nbsp;")
+                st.caption("Queda como adeudo generado.")
+
         nueva_descripcion = st.text_input(
             "Descripción",
             value=actual["descripcion"],
             key=f"edit_desc_{movimiento_id}",
         )
+
+        if actual["descripcion_banco"]:
+            pie = f"Del banco: **{actual['descripcion_banco']}**"
+            if actual["referencia_externa"]:
+                pie += f" · folio `{actual['referencia_externa']}`"
+            st.caption(pie)
+
+        previos_edicion = servicios.movimientos.nombres_de_proyecto()
+        opciones_proyecto = ["— ninguno —", *previos_edicion]
+        nuevo_proyecto = st.selectbox(
+            "Proyecto",
+            opciones_proyecto,
+            index=opciones_proyecto.index(actual["proyecto"])
+            if actual["proyecto"] in opciones_proyecto
+            else 0,
+            accept_new_options=True,
+            key=f"edit_proy_{movimiento_id}",
+        )
+        if nuevo_proyecto == "— ninguno —":
+            nuevo_proyecto = ""
 
         edicion_2 = st.columns(2)
 
@@ -404,6 +621,8 @@ with explorar:
                         descripcion=nueva_descripcion,
                         categoria_id=opciones_edicion[nueva_categoria],
                         cuenta_id=opciones_cuenta_edicion[nueva_cuenta],
+                        fecha_pago=nueva_fecha_pago,
+                        proyecto=nuevo_proyecto,
                     )
                 except ValueError as error:
                     reportar_error(error)
@@ -411,6 +630,85 @@ with explorar:
                     invalidar_datos()
                     st.success("Movimiento actualizado.", icon=":material/check:")
                     st.rerun()
+
+        # El detalle de una compra de varias cosas. Vive aparte del
+        # movimiento y no lo parte: sigue siendo un gasto con su categoría.
+        with st.expander("Productos de esta compra", icon=":material/list_alt:"):
+            productos = servicios.productos.de_movimiento(movimiento_id)
+            base = (
+                productos[["producto", "cantidad", "precio_unitario", "nota"]]
+                if not productos.empty
+                else pd.DataFrame(
+                    columns=["producto", "cantidad", "precio_unitario", "nota"]
+                )
+            )
+
+            st.caption(
+                "Apunta qué venía dentro. No hace falta listarlo todo: el "
+                "detalle puede quedarse a medias."
+            )
+
+            editados = st.data_editor(
+                base,
+                num_rows="dynamic",
+                hide_index=True,
+                width="stretch",
+                key=f"prods_{movimiento_id}",
+                column_config={
+                    "producto": st.column_config.TextColumn(
+                        "Producto", width="large", required=True
+                    ),
+                    "cantidad": st.column_config.NumberColumn(
+                        "Cantidad", min_value=0.01, default=1.0, format="%.2f"
+                    ),
+                    "precio_unitario": st.column_config.NumberColumn(
+                        "Precio unitario", min_value=0.0, default=0.0, format="$%.2f"
+                    ),
+                    "nota": st.column_config.TextColumn("Nota"),
+                },
+            )
+
+            suma = float(
+                (
+                    editados["cantidad"].fillna(1)
+                    * editados["precio_unitario"].fillna(0)
+                ).sum()
+            )
+            resto = round(float(actual["monto"]) - suma, 2)
+
+            if resto < -0.01:
+                st.warning(
+                    f"Los productos suman {moneda(abs(resto))} más de lo que "
+                    "costó el movimiento.",
+                    icon=":material/balance:",
+                )
+            elif resto > 0.01:
+                st.caption(
+                    f"Detallado {moneda(suma)} de {moneda(float(actual['monto']))} "
+                    f"· quedan {moneda(resto)} sin apuntar"
+                )
+            elif suma:
+                st.caption("El detalle cubre el movimiento completo.")
+
+            if st.button("Guardar productos", icon=":material/save:"):
+                servicios.productos.reemplazar(movimiento_id, editados)
+                invalidar_datos()
+                st.success("Productos guardados.", icon=":material/check:")
+                st.rerun()
+
+        if float(actual["por_pagar"]) > 0:
+            st.info(
+                f"Este gasto lleva pendiente de pago desde el "
+                f"{actual['fecha'].strftime('%d/%m/%Y')}.",
+                icon=":material/schedule:",
+            )
+            if st.button(
+                "Marcar como pagado hoy", type="primary", icon=":material/payments:"
+            ):
+                servicios.movimientos.marcar_pagado(movimiento_id)
+                invalidar_datos()
+                st.success("Movimiento marcado como pagado.", icon=":material/check:")
+                st.rerun()
 
         with acciones[1]:
             if st.button("Duplicar hoy", icon=":material/content_copy:"):

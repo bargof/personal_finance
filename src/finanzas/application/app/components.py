@@ -8,15 +8,19 @@ import pandas as pd
 import streamlit as st
 
 from finanzas.analytics import aggregations as agg
+from finanzas.application.app import theme as tema
 from finanzas.application.services.analytics_service import (
     AnalyticsService,
     TableroPeriodo,
 )
 from finanzas.application.services.catalogos_service import CatalogosService
+from finanzas.application.services.deseos_service import DeseosService
 from finanzas.application.services.metas_service import MetasService
 from finanzas.application.services.movimientos_service import MovimientosService
 from finanzas.application.services.patrimonio_service import PatrimonioService
 from finanzas.application.services.presupuesto_service import PresupuestoService
+from finanzas.application.services.productos_service import ProductosService
+from finanzas.application.services.proyectos_service import ProyectosService
 from finanzas.application.services.suscripciones_service import SuscripcionesService
 
 # ═══════════════════════════════════════════════════════════
@@ -29,25 +33,28 @@ from finanzas.application.services.suscripciones_service import SuscripcionesSer
 
 # ── Paleta ───────────────────────────────────────────────
 #
-# Slots categóricos en orden fijo: el color sigue a la serie,
-# nunca a su tamaño ni a su posición en el ranking.
+# Los colores viven en `theme.py` y dependen del tema activo:
+# aquí sólo se nombran los estados, que son los mismos en
+# ambos y se resuelven a color al dibujar.
 
-SERIE_1 = "#2a78d6"  # azul
-SERIE_2 = "#eb6834"  # naranja
-SERIE_3 = "#1baf7a"  # aqua
 
-#: Colores de estado; nunca se reutilizan como color de serie.
-ESTADO_COLOR = {
-    "En orden": "#0ca30c",
-    "Atención": "#fab219",
-    "Excedido": "#d03b3b",
-    "Sin presupuesto": "#898781",
-    "Configurar": "#ec835a",
-    "En ruta": "#0ca30c",
-    "Ajustar aportación": "#fab219",
-    "Vencida": "#d03b3b",
-    "Lograda": "#0ca30c",
-}
+def estado_color(estado: str) -> str:
+    """Color del estado en el tema activo; nunca es un color de serie."""
+    p = tema.paleta()
+    colores = {
+        "En orden": p.exito,
+        "Atención": p.atencion,
+        "Excedido": p.error,
+        "Sin presupuesto": p.neutro,
+        "Configurar": p.ajuste,
+        "En ruta": p.exito,
+        "Ajustar aportación": p.atencion,
+        "Vencida": p.error,
+        "Lograda": p.exito,
+    }
+
+    return colores.get(estado, p.neutro)
+
 
 #: Icono de estado; acompaña siempre al color, que nunca va solo.
 ESTADO_ICONO = {
@@ -76,6 +83,9 @@ class Servicios:
     patrimonio: PatrimonioService
     suscripciones: SuscripcionesService
     analytics: AnalyticsService
+    proyectos: ProyectosService
+    deseos: DeseosService
+    productos: ProductosService
 
 
 @st.cache_resource
@@ -94,6 +104,9 @@ def obtener_servicios() -> Servicios:
         patrimonio=PatrimonioService(),
         suscripciones=SuscripcionesService(),
         analytics=AnalyticsService(),
+        proyectos=ProyectosService(),
+        deseos=DeseosService(),
+        productos=ProductosService(),
     )
 
 
@@ -209,19 +222,20 @@ def grafico_tendencia(tendencia: pd.DataFrame) -> alt.Chart:
             "ahorro_inversion": "Ahorro e inversión",
         }
     )
+    p = tema.paleta()
 
     return (
         alt.Chart(largo)
-        .mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=45, filled=True))
+        .mark_line(strokeWidth=2.2, point=alt.OverlayMarkDef(size=42, filled=True))
         .encode(
             x=alt.X("periodo:O", title=None, axis=alt.Axis(labelAngle=-45)),
-            y=alt.Y("monto:Q", title="Monto"),
+            y=alt.Y("monto:Q", title=None),
             color=alt.Color(
                 "serie:N",
                 title=None,
                 scale=alt.Scale(
                     domain=["Ingresos", "Gastos", "Ahorro e inversión"],
-                    range=[SERIE_1, SERIE_2, SERIE_3],
+                    range=[p.serie_1, p.serie_2, p.serie_3],
                 ),
                 legend=alt.Legend(orient="top"),
             ),
@@ -249,7 +263,7 @@ def grafico_barras(
     Teñir cada barra según su tamaño duplicaría lo que ya dice su longitud
     y gastaría el único canal libre que queda.
     """
-    eje_categoria = alt.Axis(labelLimit=180)
+    eje_categoria = alt.Axis(labelLimit=180, domain=False, ticks=False)
 
     if horizontal:
         codificacion = {
@@ -259,7 +273,7 @@ def grafico_barras(
                 sort="-x",
                 axis=eje_categoria,
             ),
-            "x": alt.X(f"{medida}:Q", title=titulo_medida),
+            "x": alt.X(f"{medida}:Q", title=None),
         }
     else:
         codificacion = {
@@ -269,12 +283,12 @@ def grafico_barras(
                 sort="-y",
                 axis=eje_categoria,
             ),
-            "y": alt.Y(f"{medida}:Q", title=titulo_medida),
+            "y": alt.Y(f"{medida}:Q", title=None),
         }
 
     return (
         alt.Chart(datos)
-        .mark_bar(color=SERIE_1, cornerRadius=4, size=18)
+        .mark_bar(color=tema.paleta().serie_1, cornerRadius=5, size=17)
         .encode(
             **codificacion,
             tooltip=[
@@ -301,22 +315,26 @@ def grafico_presupuesto(presupuesto: pd.DataFrame) -> alt.Chart:
     largo["serie"] = largo["serie"].map(
         {"presupuesto_activo": "Presupuesto", "gasto_del_mes": "Gasto"}
     )
+    p = tema.paleta()
 
     return (
         alt.Chart(largo)
-        .mark_bar(cornerRadius=4, size=12)
+        .mark_bar(cornerRadius=3, size=11)
         .encode(
             y=alt.Y(
-                "categoria:N", title=None, sort="-x", axis=alt.Axis(labelLimit=180)
+                "categoria:N",
+                title=None,
+                sort="-x",
+                axis=alt.Axis(labelLimit=180, domain=False, ticks=False),
             ),
-            x=alt.X("monto:Q", title="Monto"),
+            x=alt.X("monto:Q", title=None),
             yOffset=alt.YOffset("serie:N"),
             color=alt.Color(
                 "serie:N",
                 title=None,
                 scale=alt.Scale(
                     domain=["Presupuesto", "Gasto"],
-                    range=[SERIE_1, SERIE_2],
+                    range=[p.serie_1, p.serie_2],
                 ),
                 legend=alt.Legend(orient="top"),
             ),
@@ -334,10 +352,14 @@ def grafico_calendario(calendario: pd.DataFrame) -> alt.Chart:
     """Gasto por día del mes; los días en cero se ven como huecos."""
     return (
         alt.Chart(calendario)
-        .mark_bar(color=SERIE_1, cornerRadius=3, size=12)
+        .mark_bar(color=tema.paleta().serie_1, cornerRadius=3, size=11)
         .encode(
-            x=alt.X("dia:O", title="Día del mes"),
-            y=alt.Y("gasto:Q", title="Gasto"),
+            x=alt.X(
+                "dia:O",
+                title="Día del mes",
+                axis=alt.Axis(domain=False, ticks=False, labelOverlap=True),
+            ),
+            y=alt.Y("gasto:Q", title=None),
             tooltip=[
                 alt.Tooltip("dia:O", title="Día"),
                 alt.Tooltip("gasto:Q", title="Gasto", format=",.0f"),
@@ -349,16 +371,18 @@ def grafico_calendario(calendario: pd.DataFrame) -> alt.Chart:
 
 def grafico_patrimonio(cierres: pd.DataFrame) -> alt.Chart:
     """Evolución del patrimonio neto: una sola serie, sin leyenda."""
+    p = tema.paleta()
+
     return (
         alt.Chart(cierres)
         .mark_line(
-            color=SERIE_1,
-            strokeWidth=2,
-            point=alt.OverlayMarkDef(size=50, filled=True, color=SERIE_1),
+            color=p.serie_1,
+            strokeWidth=2.2,
+            point=alt.OverlayMarkDef(size=48, filled=True, color=p.serie_1),
         )
         .encode(
             x=alt.X("periodo:O", title=None, axis=alt.Axis(labelAngle=-45)),
-            y=alt.Y("patrimonio_neto:Q", title="Patrimonio neto"),
+            y=alt.Y("patrimonio_neto:Q", title=None),
             tooltip=[
                 alt.Tooltip("periodo:N", title="Periodo"),
                 alt.Tooltip("patrimonio_neto:Q", title="Patrimonio", format=",.0f"),
