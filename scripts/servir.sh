@@ -34,11 +34,17 @@ fi
 
 parar >/dev/null 2>&1 || true
 
+# XSRF y CORS van apagados sólo aquí: con ellos, un navegador que llega
+# por una IP distinta de localhost carga el HTML pero el WebSocket se
+# rechaza y la app se queda «cargando» para siempre. Detrás de Tailscale
+# la red ya es privada, que es lo que esas dos protecciones suplen.
 nohup caffeinate -is .venv/bin/python -m streamlit run app.py \
     --server.address 0.0.0.0 \
     --server.port 8501 \
     --server.headless true \
     --server.fileWatcherType none \
+    --server.enableXsrfProtection false \
+    --server.enableCORS false \
     >>"$REGISTRO" 2>&1 &
 echo $! >"$PID_FILE"
 
