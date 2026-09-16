@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.bargof.finanzas</string>
+
+    <!-- caffeinate -i evita que la Mac duerma mientras la app viva. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-i</string>
+        <string>/Users/bargof/Repos/personal_finance/.venv/bin/python</string>
+        <string>-m</string>
+        <string>streamlit</string>
+        <string>run</string>
+        <string>app.py</string>
+        <string>--server.address</string>
+        <string>0.0.0.0</string>
+        <string>--server.port</string>
+        <string>8501</string>
+        <string>--server.headless</string>
+        <string>true</string>
+        <string>--server.fileWatcherType</string>
+        <string>none</string>
+        <string>--server.enableXsrfProtection</string>
+        <string>false</string>
+        <string>--server.enableCORS</string>
+        <string>false</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/bargof/Repos/personal_finance</string>
+
+    <!-- Arranca al iniciar sesión y se relanza si muere. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/bargof/Repos/personal_finance/logs/servicio.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/bargof/Repos/personal_finance/logs/servicio.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/bargof</string>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

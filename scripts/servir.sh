@@ -4,6 +4,16 @@
 #   ./scripts/servir.sh          arranca (o reinicia) en segundo plano
 #   ./scripts/servir.sh parar    la detiene
 #
+# Para que sobreviva a cerrar sesión, reiniciar o a que el proceso muera,
+# lo que conviene es el servicio de launchd, no este script:
+#
+#   cp scripts/com.bargof.finanzas.plist ~/Library/LaunchAgents/
+#   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.bargof.finanzas.plist
+#
+# y para detenerlo:
+#
+#   launchctl bootout gui/$(id -u)/com.bargof.finanzas
+#
 # `caffeinate -is` evita que la Mac duerma mientras el proceso viva. No
 # evita el sueño por cerrar la tapa: una laptop con la tapa cerrada se
 # duerme salvo que tenga monitor externo. Déjala abierta y enchufada.
