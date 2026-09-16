@@ -82,6 +82,24 @@ SIN_PROYECTO = "— ninguno —"
 SIN_SUBCATEGORIA = "— sin subcategoría —"
 
 
+def _opciones(df) -> dict[str, int]:
+    """Convierte un catálogo en {nombre: id} para alimentar un selector."""
+    return {fila.nombre: int(fila.id) for fila in df.itertuples()}
+
+
+def _categorias_de(tipo: str):
+    """
+    Devuelve las categorías del tipo elegido.
+
+    Si el tipo aún no tiene categorías propias, se muestran todas para no
+    dejar al usuario sin poder capturar.
+    """
+    df = catalogos["categorias"]
+    propias = df[df["tipo"] == tipo]
+
+    return propias if not propias.empty else df
+
+
 def _nombre_de(identificador: int | None, opciones: dict[str, int]) -> str:
     """Traduce un id de catálogo a su nombre, o cadena vacía si no está."""
     if identificador is None:
@@ -482,34 +500,79 @@ if st.session_state.get("paso") == "completar":
         text=f"Movimiento {indice + 1} de {total} · {listos} completos",
     )
 
+    # Lo que dijo el banco, como contexto: el formulario de abajo es el
+    # mismo de Movimientos, con los valores del documento ya puestos.
     with st.container(border=True):
-        cabecera = st.columns([3, 1, 1])
-        with cabecera[0]:
-            st.markdown(f"### {origen.descripcion_banco}")
-            detalle = f"{origen.fecha:%d/%m/%Y} · {candidato.tipo}"
+        contexto = st.columns([3, 1])
+        with contexto[0]:
+            st.markdown(f"**Del banco:** {origen.descripcion_banco}")
+            pista = f"{origen.fecha:%d/%m/%Y} · sugerido como {candidato.tipo_sugerido}"
             if origen.categoria_banco:
-                detalle += f" · el banco lo clasificó como {origen.categoria_banco}"
-            st.caption(detalle)
-        with cabecera[1]:
-            st.metric("Monto", moneda(origen.monto, decimales=2), border=True)
-        with cabecera[2]:
+                pista += f" · lo clasificó como {origen.categoria_banco}"
             if origen.referencia:
-                st.caption(f"Folio\n\n`{origen.referencia}`")
+                pista += f" · folio `{origen.referencia}`"
+            st.caption(pista)
+        with contexto[1]:
+            st.metric("Cobro", moneda(origen.monto, decimales=2))
 
-        st.divider()
-
-        opciones_categoria = {
-            fila.nombre: int(fila.id) for fila in catalogos["categorias"].itertuples()
-        }
-        nombres = list(opciones_categoria)
-        opciones_cuenta = {
-            fila.nombre: int(fila.id) for fila in catalogos["cuentas"].itertuples()
-        }
-        nombres_cuenta = list(opciones_cuenta)
-
-        fila_1 = st.columns(2)
+    with st.container(border=True):
+        fila_1 = st.columns([1, 2, 1])
 
         with fila_1[0]:
+            # Fecha y monto no se editan: son lo que el banco va a repetir
+            # en el siguiente estado de cuenta, y con lo que se reconoce un
+            # movimiento ya importado.
+            st.date_input(
+                "Fecha",
+                value=origen.fecha,
+                format="DD/MM/YYYY",
+                disabled=True,
+                help=(
+                    "Viene del estado de cuenta y no se cambia: es con la que "
+                    "se reconoce el movimiento si vuelves a importar."
+                ),
+                key=f"fecha_{indice}",
+            )
+
+        with fila_1[1]:
+            tipos = [str(valor) for valor in TipoMovimiento]
+            tipo = st.segmented_control(
+                "Tipo",
+                tipos,
+                default=candidato.tipo,
+                key=f"tipo_{indice}",
+                persist_state="session",
+                help=(
+                    "El banco sólo dice si entró o salió dinero. Un abono en "
+                    "la tarjeta puede ser el pago del corte —un traspaso— o "
+                    "una devolución, que sí es ingreso."
+                ),
+            )
+            candidato.tipo_elegido = tipo or candidato.tipo_sugerido
+
+        with fila_1[2]:
+            # Tampoco se edita: junto con la fecha, es lo que identifica
+            # el movimiento frente al documento.
+            st.number_input(
+                "Monto",
+                value=float(origen.monto),
+                format="%.2f",
+                disabled=True,
+                help=(
+                    "Viene del estado de cuenta y no se cambia: es con lo "
+                    "que se reconoce el movimiento si vuelves a importar."
+                ),
+                key=f"monto_{indice}",
+            )
+
+        tipo = candidato.tipo
+        categorias_tipo = _categorias_de(tipo)
+        opciones_categoria = _opciones(categorias_tipo)
+        nombres = list(opciones_categoria)
+
+        fila_2 = st.columns(3)
+
+        with fila_2[0]:
             sugerida = _sugerir_categoria(origen.categoria_banco, opciones_categoria)
             actual = _nombre_de(candidato.categoria_id, opciones_categoria)
             inicial = actual or sugerida
@@ -517,35 +580,85 @@ if st.session_state.get("paso") == "completar":
                 "Categoría",
                 nombres,
                 index=nombres.index(inicial) if inicial in nombres else 0,
-                key=f"cat_{indice}",
+                key=f"cat_{indice}_{tipo}",
                 persist_state="session",
             )
             candidato.categoria_id = opciones_categoria[categoria]
 
-        with fila_1[1]:
+        with fila_2[1]:
             candidato.subcategoria_id = _selector_subcategoria(
                 candidato.categoria_id,
                 candidato.subcategoria_id,
                 clave=f"sub_{indice}",
             )
 
-        cuenta_previa = _nombre_de(candidato.cuenta_id, opciones_cuenta)
-        inicial_cuenta = cuenta_previa or st.session_state.get("cuenta_documento", "")
-        cuenta = st.selectbox(
-            "Cuenta",
-            nombres_cuenta,
-            index=nombres_cuenta.index(inicial_cuenta)
-            if inicial_cuenta in nombres_cuenta
-            else 0,
-            key=f"cta_{indice}",
-            persist_state="session",
-        )
-        candidato.cuenta_id = opciones_cuenta[cuenta]
-        st.session_state["cuenta_documento"] = cuenta
+        es_traspaso = tipo == str(TipoMovimiento.TRANSFERENCIA)
+
+        with fila_2[2]:
+            opciones_cuenta = _opciones(catalogos["cuentas"])
+            nombres_cuenta = list(opciones_cuenta)
+            cuenta_previa = _nombre_de(candidato.cuenta_id, opciones_cuenta)
+            inicial_cuenta = cuenta_previa or st.session_state.get(
+                "cuenta_documento", ""
+            )
+            cuenta = st.selectbox(
+                "Cuenta de origen" if es_traspaso else "Cuenta",
+                nombres_cuenta,
+                index=nombres_cuenta.index(inicial_cuenta)
+                if inicial_cuenta in nombres_cuenta
+                else 0,
+                key=f"cta_{indice}",
+                persist_state="session",
+            )
+            candidato.cuenta_id = opciones_cuenta[cuenta]
+            st.session_state["cuenta_documento"] = cuenta
+
+        # Sólo un traspaso tiene dos patas; en lo demás el dinero entra o
+        # sale, no se mueve de un bolsillo propio a otro.
+        if es_traspaso:
+            destino = st.columns([1, 2])
+
+            with destino[0]:
+                otras = {
+                    nombre: identificador
+                    for nombre, identificador in opciones_cuenta.items()
+                    if identificador != candidato.cuenta_id
+                }
+                opciones_destino = {"— sin especificar —": None} | otras
+                nombres_destino = list(opciones_destino)
+                previo_destino = _nombre_de(candidato.cuenta_destino_id, otras)
+                cuenta_destino = st.selectbox(
+                    "Cuenta de destino",
+                    nombres_destino,
+                    index=nombres_destino.index(previo_destino)
+                    if previo_destino in nombres_destino
+                    else 0,
+                    key=f"dest_{indice}",
+                    persist_state="session",
+                    help="A dónde llega el dinero que sale de la cuenta de origen.",
+                )
+                candidato.cuenta_destino_id = opciones_destino[cuenta_destino]
+
+            with destino[1]:
+                st.markdown("&nbsp;")
+                if candidato.cuenta_destino_id is None:
+                    st.warning(
+                        "Sin destino, el traspaso no dice dónde acabó el dinero.",
+                        icon=":material/help:",
+                    )
+                else:
+                    st.info(
+                        f"Sale de **{cuenta}** y entra a **{cuenta_destino}**. "
+                        "El traspaso no es gasto ni ingreso.",
+                        icon=":material/swap_horiz:",
+                    )
+        else:
+            candidato.cuenta_destino_id = None
 
         candidato.descripcion = st.text_input(
             "Descripción",
             value=candidato.descripcion or origen.descripcion_banco,
+            placeholder="Supermercado quincenal",
             help=(
                 "Cómo lo describirías tú. Puedes cambiarla sin perder nada: "
                 "el concepto del banco se guarda en su propia columna."
@@ -553,11 +666,30 @@ if st.session_state.get("paso") == "completar":
             key=f"desc_{indice}",
             persist_state="session",
         )
-        st.caption(f"Se conserva del banco: **{origen.descripcion_banco}**")
 
-        fila_2 = st.columns(4)
+        fila_3 = st.columns(3)
 
-        with fila_2[0]:
+        with fila_3[0]:
+            opciones_medio = {"— sin especificar —": None} | _opciones(
+                catalogos["medios_pago"]
+            )
+            nombres_medio = list(opciones_medio)
+            previo_medio = _nombre_de(
+                candidato.medio_pago_id,
+                {k: v for k, v in opciones_medio.items() if v is not None},
+            )
+            medio = st.selectbox(
+                "Medio de pago",
+                nombres_medio,
+                index=nombres_medio.index(previo_medio)
+                if previo_medio in nombres_medio
+                else 0,
+                key=f"medio_{indice}",
+                persist_state="session",
+            )
+            candidato.medio_pago_id = opciones_medio[medio]
+
+        with fila_3[1]:
             candidato.necesidad = st.segmented_control(
                 "Esencial o deseo",
                 [str(valor) for valor in Necesidad],
@@ -566,7 +698,7 @@ if st.session_state.get("paso") == "completar":
                 persist_state="session",
             ) or str(Necesidad.ESENCIAL)
 
-        with fila_2[1]:
+        with fila_3[2]:
             candidato.naturaleza = st.segmented_control(
                 "Fijo o variable",
                 [str(valor) for valor in Naturaleza],
@@ -575,104 +707,53 @@ if st.session_state.get("paso") == "completar":
                 persist_state="session",
             ) or str(Naturaleza.VARIABLE)
 
-        with fila_2[2]:
-            previos = servicios.proyectos.nombres()
-            opciones_proyecto = [SIN_PROYECTO, *previos]
-            elegido = candidato.proyecto or SIN_PROYECTO
-            proyecto = st.selectbox(
-                "Proyecto",
-                opciones_proyecto,
-                index=opciones_proyecto.index(elegido)
-                if elegido in opciones_proyecto
-                else 0,
-                accept_new_options=True,
-                key=f"proy_{indice}",
-                persist_state="session",
-            )
-            candidato.proyecto = "" if proyecto == SIN_PROYECTO else proyecto
+        with st.expander("Detalle adicional", icon=":material/more_horiz:"):
+            fila_4 = st.columns(3)
 
-        with fila_2[3]:
-            candidato.pagado = st.checkbox(
-                "Ya se pagó",
-                value=candidato.pagado,
-                help=(
-                    "En una tarjeta de crédito déjalo sin marcar: el gasto ya "
-                    "ocurrió pero el dinero sale hasta que pagues el corte."
-                ),
-                key=f"pag_{indice}",
-                persist_state="session",
-            )
-
-        # Lo que el documento no trae y el movimiento sí admite: sin esto,
-        # importar dejaría movimientos a medio llenar frente a los que se
-        # capturan a mano.
-        with st.expander("Más detalle", icon=":material/more_horiz:"):
-            fila_3 = st.columns(3)
-
-            with fila_3[0]:
-                opciones_medio = {"— sin especificar —": None} | {
-                    fila.nombre: int(fila.id)
-                    for fila in catalogos["medios_pago"].itertuples()
-                }
-                nombres_medio = list(opciones_medio)
-                previo_medio = _nombre_de(
-                    candidato.medio_pago_id,
-                    {k: v for k, v in opciones_medio.items() if v is not None},
-                )
-                medio = st.selectbox(
-                    "Medio de pago",
-                    nombres_medio,
-                    index=nombres_medio.index(previo_medio)
-                    if previo_medio in nombres_medio
+            with fila_4[0]:
+                previos = servicios.proyectos.nombres()
+                opciones_proyecto = [SIN_PROYECTO, *previos]
+                elegido = candidato.proyecto or SIN_PROYECTO
+                proyecto = st.selectbox(
+                    "Proyecto o persona",
+                    opciones_proyecto,
+                    index=opciones_proyecto.index(elegido)
+                    if elegido in opciones_proyecto
                     else 0,
-                    key=f"medio_{indice}",
+                    accept_new_options=True,
+                    help=(
+                        "Agrupa movimientos de distintas categorías bajo un "
+                        "mismo esfuerzo: un viaje, una mudanza, una obra. "
+                        "Escribe uno nuevo para crearlo."
+                    ),
+                    key=f"proy_{indice}",
                     persist_state="session",
                 )
-                candidato.medio_pago_id = opciones_medio[medio]
+                candidato.proyecto = "" if proyecto == SIN_PROYECTO else proyecto
 
-            with fila_3[1]:
-                estados = [str(valor) for valor in EstadoMovimiento]
-                candidato.estado_movimiento = st.selectbox(
+            with fila_4[1]:
+                candidato.etiquetas = st.text_input(
+                    "Etiquetas",
+                    value=candidato.etiquetas,
+                    placeholder="despensa, quincena",
+                    key=f"etq_{indice}",
+                    persist_state="session",
+                )
+
+            with fila_4[2]:
+                candidato.estado_movimiento = st.segmented_control(
                     "Estado",
-                    estados,
-                    index=estados.index(candidato.estado_movimiento)
-                    if candidato.estado_movimiento in estados
-                    else 0,
+                    [str(valor) for valor in EstadoMovimiento],
+                    default=candidato.estado_movimiento,
                     key=f"estado_{indice}",
                     persist_state="session",
-                    help="Pendiente es una proyección; confirmado ya ocurrió.",
-                )
+                ) or str(EstadoMovimiento.CONFIRMADO)
 
-            with fila_3[2]:
-                # Sólo un traspaso tiene dos patas.
-                if candidato.tipo == str(TipoMovimiento.TRANSFERENCIA):
-                    otras = {
-                        nombre: valor
-                        for nombre, valor in opciones_cuenta.items()
-                        if valor != candidato.cuenta_id
-                    }
-                    opciones_destino = {"— sin especificar —": None} | otras
-                    nombres_destino = list(opciones_destino)
-                    previo_destino = _nombre_de(candidato.cuenta_destino_id, otras)
-                    destino = st.selectbox(
-                        "Cuenta de destino",
-                        nombres_destino,
-                        index=nombres_destino.index(previo_destino)
-                        if previo_destino in nombres_destino
-                        else 0,
-                        key=f"dest_{indice}",
-                        persist_state="session",
-                        help="A dónde llegó el dinero del traspaso.",
-                    )
-                    candidato.cuenta_destino_id = opciones_destino[destino]
-                else:
-                    candidato.cuenta_destino_id = None
-
-            candidato.etiquetas = st.text_input(
-                "Etiquetas",
-                value=candidato.etiquetas,
-                placeholder="despensa, quincena",
-                key=f"etq_{indice}",
+            candidato.nota = st.text_area(
+                "Nota o comprobante",
+                value=candidato.nota,
+                height=80,
+                key=f"nota_{indice}",
                 persist_state="session",
             )
 
@@ -692,12 +773,41 @@ if st.session_state.get("paso") == "completar":
                     persist_state="session",
                 )
 
-        candidato.nota = st.text_input(
-            "Nota",
-            value=candidato.nota,
-            key=f"nota_{indice}",
-            persist_state="session",
-        )
+        # Fuera del expander de detalle: decidir si ya se pagó es parte de
+        # la captura normal, no un ajuste fino.
+        pago = st.columns([1, 1, 2])
+
+        with pago[0]:
+            candidato.pagado = st.checkbox(
+                "Ya se pagó",
+                value=candidato.pagado,
+                key=f"pag_{indice}",
+                persist_state="session",
+                help=(
+                    "En una tarjeta de crédito déjalo sin marcar: el gasto ya "
+                    "ocurrió pero el dinero sale hasta que pagues el corte."
+                ),
+            )
+
+        with pago[1]:
+            if candidato.pagado:
+                candidato.fecha_pago = st.date_input(
+                    "Fecha de pago",
+                    value=candidato.fecha_pago or origen.fecha_cargo or origen.fecha,
+                    format="DD/MM/YYYY",
+                    key=f"fpago_{indice}",
+                    persist_state="session",
+                )
+            else:
+                candidato.fecha_pago = None
+                st.markdown("&nbsp;")
+
+        with pago[2]:
+            if not candidato.pagado:
+                st.info(
+                    "Queda como pendiente de pago y suma a tus adeudos.",
+                    icon=":material/schedule:",
+                )
 
         # ── Qué venía en la compra ───────────────────────
 
@@ -707,8 +817,9 @@ if st.session_state.get("paso") == "completar":
             key=f"detalle_{indice}",
             persist_state="session",
             help=(
-                "Para una compra de varias cosas: el gasto sigue siendo uno "
-                "con su categoría, y esto guarda qué había dentro."
+                "Para una compra de varias cosas. El gasto sigue siendo uno "
+                "con su categoría; esto guarda qué venía dentro, y no hace "
+                "falta listarlo todo."
             ),
         )
 
@@ -730,49 +841,50 @@ if st.session_state.get("paso") == "completar":
             icon=":material/balance:",
         )
 
-    navegacion = st.columns([1, 1, 1, 1, 2])
+    navegacion = st.columns([1, 1, 1, 3])
 
     with navegacion[0]:
         if st.button("Anterior", icon=":material/arrow_back:", disabled=indice == 0):
+            _guardar_actual(candidato)
             st.session_state["indice"] = indice - 1
+            _recordar()
             st.rerun()
 
     with navegacion[1]:
-        ultimo = indice + 1 >= total
-        if st.button(
-            "Revisar y guardar" if ultimo else "Siguiente",
-            type="primary",
-            icon=":material/arrow_forward:",
-        ):
-            st.session_state["indice"] = indice + 1
+        # Avanzar más allá del último no cierra la edición: dar la vuelta
+        # entera es normal cuando se corrige algo, y sólo «Terminar»
+        # decide que ya está.
+        if st.button("Siguiente", type="primary", icon=":material/arrow_forward:"):
+            _guardar_actual(candidato)
+            st.session_state["indice"] = (indice + 1) % total
+            _recordar()
             st.rerun()
 
     with navegacion[2]:
-        # Guardar sin llegar al final: lo completo entra, lo demás sigue
-        # esperando en la lista.
-        if st.button(
-            "Guardar lo listo",
-            icon=":material/save:",
-            disabled=listos == 0,
-            help=f"Guarda ahora los {listos} movimientos ya completos.",
-        ):
-            st.session_state["paso"] = "guardar"
+        if st.button("Saltar éste", icon=":material/skip_next:"):
+            # Saltar significa lo mismo antes y después de haber guardado:
+            # si ya estaba en la base, sale de ella.
+            candidato.incluir = False
+            importacion.descartar(candidato)
+            st.session_state["indice"] = indice % max(total - 1, 1)
+            _recordar()
             st.rerun()
 
     with navegacion[3]:
-        if st.button("Saltar éste", icon=":material/skip_next:"):
-            candidato.incluir = False
-            st.session_state["indice"] = indice
+        if st.button("Terminar", icon=":material/task_alt:"):
+            _guardar_actual(candidato)
+            st.session_state["paso"] = "guardar"
+            _recordar("guardar")
             st.rerun()
 
-    with navegacion[4]:
-        if st.button("Salir del detalle", icon=":material/close:"):
-            st.session_state["paso"] = "revisar"
-            st.rerun()
-
-    st.caption(
-        "Lo que llevas capturado se conserva aunque cambies de página y vuelvas."
+    escritos = sum(len(c.guardados) for c in resultado.candidatos)
+    pie = (
+        "Se guarda solo al avanzar, saltar o terminar, y el avance "
+        "sobrevive a recargar la página."
     )
+    if escritos:
+        pie += f" Llevas {escritos} movimientos guardados."
+    st.caption(pie)
 
     st.stop()
 

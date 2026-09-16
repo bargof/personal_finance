@@ -887,3 +887,118 @@ def test_un_avance_ilegible_se_descarta_sin_romper(importacion, db_path):
         )
 
     assert importacion.recuperar_avance() is None
+
+
+# ═══════════════════════════════════════════════════════════
+# Homologación con la captura manual
+#
+# Lo que el documento trae también se puede corregir: el banco
+# sólo sabe si entró o salió dinero, y un abono en la tarjeta
+# puede ser el pago del corte o una devolución, que no es lo
+# mismo. El original queda en `origen` para el cuadre.
+# ═══════════════════════════════════════════════════════════
+
+
+def test_un_abono_que_no_es_pago_llega_como_ingreso(importacion):
+    """Una devolución entra dinero, pero no es un traspaso propio."""
+    documento = MP_TARJETA.replace(
+        "14/08 Compra en ANTHROPIC* CLAUDE SUB US$ 20.00 $ 341.00",
+        "14/08 Devolucion LIVERPOOL - $ 459.00",
+    )
+    resultado = importacion.leer_documento(documento.encode())
+    devolucion = next(c for c in resultado.candidatos if c.origen.monto == 459.00)
+    pago = next(c for c in resultado.candidatos if c.origen.es_pago_tarjeta)
+
+    assert devolucion.tipo_sugerido == str(TipoMovimiento.INGRESO)
+    assert pago.tipo_sugerido == str(TipoMovimiento.TRANSFERENCIA)
+
+
+def test_el_usuario_puede_cambiar_el_tipo_sugerido(importacion, servicio, ids_catalogo):
+    """Lo sugerido es un punto de partida, no una decisión."""
+    resultado = importacion.leer_documento(MP_TARJETA.encode())
+    pago = next(c for c in resultado.candidatos if c.origen.es_pago_tarjeta)
+    pago.tipo_elegido = str(TipoMovimiento.GASTO)
+    pago.categoria_id = ids_catalogo["vivienda"]
+    pago.cuenta_id = ids_catalogo["cuenta"]
+
+    importacion.guardar_uno(pago, ids_catalogo["cuenta"])
+
+    assert servicio.buscar().iloc[0]["tipo"] == str(TipoMovimiento.GASTO)
+
+
+def test_fecha_y_monto_siempre_son_los_del_banco(importacion, servicio, ids_catalogo):
+    """
+    A diferencia del tipo, ni la fecha ni el monto se corrigen.
+
+    Son con lo que se reconoce el movimiento al reimportar, y corregidos
+    dejarían de coincidir con lo que el banco va a repetir.
+    """
+    from datetime import date as fecha_tipo
+
+    resultado = importacion.leer_documento(MP_TARJETA.encode())
+    candidato = resultado.candidatos[0]
+    candidato.categoria_id = ids_catalogo["vivienda"]
+    candidato.cuenta_id = ids_catalogo["cuenta"]
+
+    importacion.guardar_uno(candidato, ids_catalogo["cuenta"])
+
+    guardado = servicio.buscar().iloc[0]
+    assert guardado["fecha"].date() == fecha_tipo(2026, 7, 22)
+    assert guardado["monto"] == 24.00
+    assert not hasattr(candidato, "fecha")
+    assert not hasattr(candidato, "monto")
+
+
+def test_sin_corregir_nada_se_guarda_lo_que_dijo_el_banco(
+    importacion, servicio, ids_catalogo
+):
+    """Los campos editables arrancan en el valor del documento."""
+    resultado = importacion.leer_documento(MP_TARJETA.encode())
+    candidato = resultado.candidatos[0]
+    candidato.categoria_id = ids_catalogo["vivienda"]
+    candidato.cuenta_id = ids_catalogo["cuenta"]
+
+    assert candidato.tipo == candidato.tipo_sugerido
+
+    importacion.guardar_uno(candidato, ids_catalogo["cuenta"])
+    guardado = servicio.buscar().iloc[0]
+
+    assert guardado["monto"] == candidato.origen.monto
+    assert guardado["fecha"].date() == candidato.origen.fecha
+
+
+def test_la_fecha_de_pago_explicita_manda_sobre_la_del_cargo(
+    importacion, servicio, ids_catalogo
+):
+    """Si el usuario dice cuándo pagó, eso es lo que vale."""
+    from datetime import date as fecha_tipo
+
+    resultado = importacion.leer_documento(NU_REGULADO.encode())
+    candidato = next(
+        c for c in resultado.candidatos if "Apple" in c.origen.descripcion_banco
+    )
+    candidato.categoria_id = ids_catalogo["vivienda"]
+    candidato.cuenta_id = ids_catalogo["cuenta"]
+    candidato.pagado = True
+    candidato.fecha_pago = fecha_tipo(2026, 7, 2)
+
+    importacion.guardar_uno(candidato, ids_catalogo["cuenta"])
+
+    assert servicio.buscar().iloc[0]["fecha_pago"].date() == fecha_tipo(2026, 7, 2)
+
+
+def test_las_correcciones_sobreviven_a_recargar(importacion, ids_catalogo):
+    """Tipo y fecha de pago corregidos van en el avance guardado."""
+    from datetime import date as fecha_tipo
+
+    resultado = importacion.leer_documento(MP_TARJETA.encode())
+    candidato = resultado.candidatos[0]
+    candidato.tipo_elegido = str(TipoMovimiento.INGRESO)
+    candidato.fecha_pago = fecha_tipo(2026, 7, 21)
+
+    importacion.guardar_avance(resultado, 0, "completar")
+    devuelto, _, _ = importacion.recuperar_avance()
+    primero = devuelto.candidatos[0]
+
+    assert primero.tipo == str(TipoMovimiento.INGRESO)
+    assert primero.fecha_pago == fecha_tipo(2026, 7, 21)

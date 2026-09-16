@@ -89,6 +89,14 @@ class Candidato:
     #: solo gasto con una categoría, y esto es su detalle.
     productos: list[Producto] = field(default_factory=list)
 
+    #: De lo que trae el documento, sólo el tipo se corrige: el banco no
+    #: distingue una devolución de un pago de tarjeta. Fecha y monto no
+    #: están aquí a propósito: son con lo que se reconoce el movimiento al
+    #: reimportar, y corregidos dejarían de coincidir con lo que el banco
+    #: va a repetir.
+    tipo_elegido: str = ""
+    fecha_pago: date | None = None
+
     #: Campos que el documento no trae y el movimiento sí admite.
     etiquetas: str = ""
     recurrente: bool = False
@@ -113,19 +121,25 @@ class Candidato:
         return bool(self.guardados)
 
     @property
-    def tipo(self) -> str:
+    def tipo_sugerido(self) -> str:
         """
         Tipo que le corresponde según lo que dice el documento.
 
         El pago de una tarjeta es un traspaso entre cuentas propias: si se
         registrara como gasto, contaría otra vez el consumo que ya se contó
-        al comprar.
+        al comprar. Un abono que no es pago —una devolución, una
+        bonificación— queda como ingreso y el usuario decide.
         """
         if self.origen.es_pago_tarjeta:
             return str(TipoMovimiento.TRANSFERENCIA)
         return str(
             TipoMovimiento.GASTO if self.origen.es_cargo else TipoMovimiento.INGRESO
         )
+
+    @property
+    def tipo(self) -> str:
+        """El tipo elegido por el usuario, o el sugerido si no lo cambió."""
+        return self.tipo_elegido or self.tipo_sugerido
 
     @property
     def desglosado(self) -> float:
@@ -520,7 +534,11 @@ class ImportacionService:
         if not (candidato.pagado or pagado):
             return None
 
-        return candidato.origen.fecha_cargo or candidato.origen.fecha
+        return (
+            candidato.fecha_pago
+            or candidato.origen.fecha_cargo
+            or candidato.origen.fecha
+        )
 
 
 # ═══════════════════════════════════════════════════════════
@@ -582,6 +600,8 @@ def serializar(resultado: ResultadoImportacion) -> str:
                     "pagado": c.pagado,
                     "revisado": c.revisado,
                     "guardados": c.guardados,
+                    "tipo_elegido": c.tipo_elegido,
+                    "fecha_pago": _a_json(c.fecha_pago),
                     "etiquetas": c.etiquetas,
                     "recurrente": c.recurrente,
                     "planeado": c.planeado,
@@ -647,6 +667,8 @@ def deserializar(crudo: str) -> ResultadoImportacion:
                 pagado=crudo_candidato["pagado"],
                 revisado=crudo_candidato["revisado"],
                 guardados=list(crudo_candidato["guardados"]),
+                tipo_elegido=crudo_candidato.get("tipo_elegido", ""),
+                fecha_pago=_fecha_de(crudo_candidato.get("fecha_pago")),
                 etiquetas=crudo_candidato.get("etiquetas", ""),
                 recurrente=crudo_candidato.get("recurrente", False),
                 planeado=crudo_candidato.get("planeado", True),

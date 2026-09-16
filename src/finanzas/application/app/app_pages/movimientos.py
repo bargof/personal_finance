@@ -253,6 +253,79 @@ with registrar:
                     icon=":material/schedule:",
                 )
 
+        # ── Qué venía en la compra ───────────────────────
+        #
+        # El detalle de una compra de varias cosas. No parte el
+        # movimiento: sigue siendo un gasto con su categoría, y esto
+        # guarda qué había dentro. Se captura aquí, en memoria, y se
+        # escribe después de crear el movimiento, que es cuando existe el
+        # id del que cuelgan.
+
+        detallar = st.toggle(
+            "Apuntar los productos",
+            key="mov_detallar",
+            help=(
+                "Para una compra de varias cosas. El gasto sigue siendo uno "
+                "con su categoría; esto guarda qué venía dentro, y no hace "
+                "falta listarlo todo."
+            ),
+        )
+
+        productos_nuevos = None
+        if detallar:
+            with st.container(border=True):
+                productos_nuevos = st.data_editor(
+                    pd.DataFrame(
+                        {
+                            "producto": pd.Series(dtype="str"),
+                            "cantidad": pd.Series(dtype="float"),
+                            "precio_unitario": pd.Series(dtype="float"),
+                            "nota": pd.Series(dtype="str"),
+                        }
+                    ),
+                    num_rows="dynamic",
+                    hide_index=True,
+                    width="stretch",
+                    key="mov_productos",
+                    column_config={
+                        "producto": st.column_config.TextColumn(
+                            "Producto", width="large", required=True
+                        ),
+                        "cantidad": st.column_config.NumberColumn(
+                            "Cantidad", min_value=0.01, default=1.0, format="%.2f"
+                        ),
+                        "precio_unitario": st.column_config.NumberColumn(
+                            "Precio unitario",
+                            min_value=0.0,
+                            default=0.0,
+                            format="$%.2f",
+                        ),
+                        "nota": st.column_config.TextColumn("Nota"),
+                    },
+                )
+
+                suma_productos = float(
+                    (
+                        productos_nuevos["cantidad"].fillna(1)
+                        * productos_nuevos["precio_unitario"].fillna(0)
+                    ).sum()
+                )
+                resto_productos = round(float(monto) - suma_productos, 2)
+
+                if resto_productos < -0.01:
+                    st.warning(
+                        f"Los productos suman {moneda(abs(resto_productos))} más "
+                        "que el monto del movimiento.",
+                        icon=":material/balance:",
+                    )
+                elif suma_productos and resto_productos > 0.01:
+                    st.caption(
+                        f"Detallado {moneda(suma_productos)} de {moneda(monto)} "
+                        f"· quedan {moneda(resto_productos)} sin apuntar"
+                    )
+                elif suma_productos:
+                    st.caption("El detalle cubre el movimiento completo.")
+
         if st.button("Registrar movimiento", type="primary", icon=":material/add:"):
             try:
                 nuevo_id = servicios.movimientos.registrar(
@@ -278,8 +351,14 @@ with registrar:
             except ValueError as error:
                 reportar_error(error)
             else:
+                cuantos = 0
+                if productos_nuevos is not None:
+                    cuantos = servicios.productos.reemplazar(nuevo_id, productos_nuevos)
+
                 invalidar_datos()
                 sufijo = "" if fecha_pago else " · pendiente de pago"
+                if cuantos:
+                    sufijo += f" · {cuantos} productos"
                 st.success(
                     f"Movimiento {nuevo_id} registrado por {moneda(monto)}{sufijo}.",
                     icon=":material/check_circle:",
