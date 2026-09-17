@@ -16,6 +16,10 @@
 #
 # Escucha en todas las interfaces para que el celular la vea; con
 # Tailscale, nada de esto sale a internet abierto.
+#
+# Vigila el código y recarga los módulos al cambiar: sin eso, la página
+# se recarga pero los servicios siguen siendo los de cuando arrancó, y
+# la interfaz nueva habla con clases viejas.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -48,7 +52,7 @@ nohup caffeinate -is .venv/bin/python -m streamlit run app.py \
     --server.address 0.0.0.0 \
     --server.port 8501 \
     --server.headless true \
-    --server.fileWatcherType none \
+    --server.fileWatcherType auto \
     --server.enableXsrfProtection false \
     --server.enableCORS false \
     >>"$REGISTRO" 2>&1 &

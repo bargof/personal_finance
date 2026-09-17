@@ -290,6 +290,27 @@ def _reiniciar() -> None:
 # Paso 1: leer
 # ═══════════════════════════════════════════════════════════
 
+
+# Tras un cambio de código, `session_state` puede traer candidatos de una
+# versión anterior de la clase —sin algún campo nuevo— y con `slots` no
+# se les puede añadir. Se descartan y se retoma del avance en la base,
+# que se reconstruye con la clase actual.
+def _sesion_compatible() -> bool:
+    resultado_previo = st.session_state.get("importacion")
+    if resultado_previo is None:
+        return True
+    muestra = resultado_previo.candidatos[:1]
+    return all(
+        hasattr(c, campo)
+        for c in muestra
+        for campo in ("lugar", "hora", "productos", "guardados", "tipo_elegido")
+    )
+
+
+if not _sesion_compatible():
+    for clave in ("importacion", "paso", "indice"):
+        st.session_state.pop(clave, None)
+
 # Una recarga vacía `session_state`, pero el avance sigue en la base.
 if "importacion" not in st.session_state:
     guardado = importacion.recuperar_avance()

@@ -128,14 +128,20 @@ _ESTILOS = """
    fijas para que no se muevan con el scroll. */
 .stApp, [data-testid="stAppViewContainer"] {
     background:
-        radial-gradient(ellipse 55% 45% at 12% 8%,  @@ACENTO_LUZ_14@@, transparent 62%),
-        radial-gradient(ellipse 45% 40% at 88% 88%, @@ACENTO_LUZ_09@@, transparent 60%),
-        radial-gradient(ellipse 35% 35% at 70% 25%,
-                        rgba(122, 162, 247, 0.07), transparent 60%),
-        radial-gradient(ellipse 40% 30% at 30% 75%,
-                        rgba(255, 255, 255, 0.025), transparent 60%),
-        #0f1216;
+        radial-gradient(ellipse 60% 50% at 10% 5%,  @@ACENTO_LUZ_26@@, transparent 60%),
+        radial-gradient(ellipse 50% 45% at 90% 92%, @@ACENTO_LUZ_18@@, transparent 58%),
+        radial-gradient(ellipse 40% 40% at 72% 22%,
+                        rgba(122, 162, 247, 0.16), transparent 58%),
+        radial-gradient(ellipse 45% 35% at 28% 78%,
+                        rgba(255, 255, 255, 0.05), transparent 58%),
+        #0f1216 !important;
     background-attachment: fixed;
+}
+/* El bloque principal debe quedar transparente para que las manchas de
+   luz se vean a través de él; Streamlit a veces le pinta el fondo. */
+[data-testid="stAppViewContainer"] > section,
+.stMainBlockContainer, [data-testid="stMain"] {
+    background: transparent !important;
 }
 
 /* Un panel de cristal: fondo apenas lechoso, desenfoque de lo que hay
@@ -145,13 +151,14 @@ _ESTILOS = """
 .cristal,
 [data-testid="stMetric"],
 [data-testid="stExpander"] > details {
-    background: rgba(255, 255, 255, 0.038) !important;
-    -webkit-backdrop-filter: blur(18px) saturate(150%);
-    backdrop-filter: blur(18px) saturate(150%);
-    border: 1px solid rgba(255, 255, 255, 0.09) !important;
+    background: rgba(255, 255, 255, 0.055) !important;
+    -webkit-backdrop-filter: blur(20px) saturate(160%);
+    backdrop-filter: blur(20px) saturate(160%);
+    border: 1px solid rgba(255, 255, 255, 0.12) !important;
+    border-radius: 0.7rem;
     box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.07),
-        0 10px 36px rgba(0, 0, 0, 0.28);
+        inset 0 1px 0 rgba(255, 255, 255, 0.10),
+        0 12px 40px rgba(0, 0, 0, 0.32);
 }
 
 [data-testid="stSidebar"] > div:first-child {
