@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 # ═══════════════════════════════════════════════════════════
 # Tema de la aplicación
@@ -251,6 +252,84 @@ header[data-testid="stHeader"] {
     font-weight: 600;
     letter-spacing: 0.01em;
 }
+
+/* ── Botones en grupo ──────────────────────────────────── */
+
+/* Un grupo de acciones se lee como una fila, también en el teléfono:
+   el contenedor horizontal hace wrap en vez de apilar. Los botones
+   crecen para repartirse el ancho y no quedar como fichas sueltas. */
+[data-testid="stHorizontalBlock"] .stButton,
+[data-testid="stHorizontalBlock"] .stFormSubmitButton {
+    flex: 1 1 auto;
+}
+[data-testid="stHorizontalBlock"] .stButton > button,
+[data-testid="stHorizontalBlock"] .stFormSubmitButton > button {
+    width: 100%;
+}
+
+/* ── Teléfono ──────────────────────────────────────────── */
+
+@media (max-width: 640px) {
+    /* iOS hace zoom solo al enfocar un campo cuyo texto mide menos de
+       16px. Es la única causa del brinco al tocar un campo, y la única
+       cura que respeta la accesibilidad: subir el texto, no bloquear. */
+    input, select, textarea,
+    .stTextInput input, .stNumberInput input, .stTextArea textarea,
+    .stSelectbox [data-baseweb="select"] *,
+    .stDateInput input, .stTimeInput input,
+    [data-baseweb="input"] input, [data-baseweb="textarea"] textarea {
+        font-size: 16px !important;
+    }
+
+    /* Menos aire lateral: cada píxel cuenta en una pantalla angosta. */
+    .stMainBlockContainer {
+        padding-left: 0.9rem;
+        padding-right: 0.9rem;
+        padding-top: 1.2rem;
+    }
+
+    .stMainBlockContainer h1 { font-size: 1.45rem; }
+    .stMainBlockContainer h2 { font-size: 1.15rem; }
+    .stMainBlockContainer h3 { font-size: 1rem; }
+
+    /* Dos métricas por fila, no una torre de cinco. */
+    [data-testid="stHorizontalBlock"] > [data-testid="stMetric"],
+    [data-testid="stHorizontalBlock"] > div:has(> [data-testid="stMetric"]) {
+        flex: 1 1 calc(50% - 0.5rem);
+        min-width: calc(50% - 0.5rem);
+    }
+    [data-testid="stMetricValue"] { font-size: 1.35rem; }
+    [data-testid="stMetricLabel"] { font-size: 0.7rem; }
+
+    /* Botones con altura de dedo, no de cursor. */
+    .stButton > button, .stFormSubmitButton > button {
+        min-height: 2.75rem;
+        padding-top: 0.55rem;
+        padding-bottom: 0.55rem;
+    }
+
+    /* El primario, a todo lo ancho: es la acción que buscas con el
+       pulgar. */
+    .stButton > button[kind="primary"],
+    .stFormSubmitButton > button[kind="primary"] {
+        width: 100%;
+    }
+
+    /* Pestañas y control segmentado: que se deslicen, no que se
+       encimen. */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 1rem;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+    .stTabs [data-baseweb="tab"] { white-space: nowrap; }
+    [data-testid="stSegmentedControl"] { overflow-x: auto; }
+
+    /* Los contenedores con borde pierden margen interno. */
+    [data-testid="stVerticalBlockBorderWrapper"] > div {
+        padding: 0.75rem;
+    }
+}
 </style>
 """
 
@@ -261,6 +340,32 @@ def _con_alfa(color: str, porcentaje: int) -> str:
     r, g, b = (int(crudo[i : i + 2], 16) for i in (0, 2, 4))
 
     return f"rgba({r}, {g}, {b}, {porcentaje / 100:.2f})"
+
+
+#: Reescribe la etiqueta viewport, que Streamlit pone y no expone.
+#:
+#: `maximum-scale=1` es lo que quita el zoom con los dedos. Corre en un
+#: iframe del mismo origen, así que puede tocar el documento padre; se
+#: anota en `dataset` para no repetirlo en cada rerun.
+_VIEWPORT = """
+<script>
+(function () {
+    try {
+        var doc = window.parent.document;
+        if (doc.documentElement.dataset.viewportFijo) { return; }
+        var meta = doc.querySelector('meta[name="viewport"]');
+        if (!meta) {
+            meta = doc.createElement('meta');
+            meta.name = 'viewport';
+            doc.head.appendChild(meta);
+        }
+        meta.content = 'width=device-width, initial-scale=1, ' +
+                       'maximum-scale=1, user-scalable=no, viewport-fit=cover';
+        doc.documentElement.dataset.viewportFijo = '1';
+    } catch (e) { /* fuera de un navegador no hay documento padre */ }
+})();
+</script>
+"""
 
 
 def aplicar_estilos() -> None:
@@ -276,6 +381,10 @@ def aplicar_estilos() -> None:
         hoja = hoja.replace(f"@@ACENTO_{porcentaje}@@", _con_alfa(acento, porcentaje))
 
     st.html(hoja)
+
+    # `st.html` descarta los scripts; el viewport necesita uno, y el
+    # componente sí lo ejecuta. Altura cero para que no deje hueco.
+    components.html(_VIEWPORT, height=0)
 
 
 def rotulo(texto: str) -> None:

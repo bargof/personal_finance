@@ -513,3 +513,78 @@ def test_editar_un_traspaso_conserva_su_destino(servicio, ids_catalogo, cuentas)
 
     assert flujo.loc["Tarjeta crédito", "flujo_neto"] == 4_000.0
     assert flujo.loc["Cuenta principal", "flujo_neto"] == -4_000.0
+
+
+# ═══════════════════════════════════════════════════════════
+# Lugar y hora
+# ═══════════════════════════════════════════════════════════
+
+
+def test_un_movimiento_guarda_lugar_y_hora(servicio, ids_catalogo):
+    """Los dos campos opcionales viajan enteros hasta la base y de vuelta."""
+    from datetime import time as hora_tipo
+
+    servicio.registrar(
+        fecha=date(2026, 9, 17),
+        tipo=TipoMovimiento.GASTO,
+        monto=180.0,
+        categoria_id=ids_catalogo["vivienda"],
+        cuenta_id=ids_catalogo["cuenta"],
+        lugar="Walmart Universidad",
+        hora=hora_tipo(19, 30),
+    )
+    guardado = servicio.buscar().iloc[0]
+
+    assert guardado["lugar"] == "Walmart Universidad"
+    assert guardado["hora"] == "19:30"
+
+
+def test_editar_conserva_lugar_y_hora(servicio, ids_catalogo):
+    """Cambiar el monto no debe borrar dónde ni a qué hora fue."""
+    from datetime import time as hora_tipo
+
+    movimiento_id = servicio.registrar(
+        fecha=date(2026, 9, 17),
+        tipo=TipoMovimiento.GASTO,
+        monto=180.0,
+        categoria_id=ids_catalogo["vivienda"],
+        cuenta_id=ids_catalogo["cuenta"],
+        lugar="Oxxo",
+        hora=hora_tipo(8, 15),
+    )
+
+    servicio.actualizar(movimiento_id, monto=200.0)
+    guardado = servicio.buscar().iloc[0]
+
+    assert guardado["lugar"] == "Oxxo"
+    assert guardado["hora"] == "08:15"
+
+
+def test_los_lugares_se_ofrecen_por_frecuencia(servicio, ids_catalogo):
+    """El súper de siempre aparece primero en el autocompletado."""
+    for lugar in ("Oxxo", "Walmart", "Walmart", "Walmart", "Oxxo"):
+        servicio.registrar(
+            fecha=date(2026, 9, 17),
+            tipo=TipoMovimiento.GASTO,
+            monto=50.0,
+            categoria_id=ids_catalogo["vivienda"],
+            cuenta_id=ids_catalogo["cuenta"],
+            lugar=lugar,
+        )
+
+    assert servicio.lugares() == ["Walmart", "Oxxo"]
+
+
+def test_la_busqueda_de_texto_tambien_mira_el_lugar(servicio, ids_catalogo):
+    """Si lo que recuerdas es dónde fue, buscarlo debe encontrarlo."""
+    servicio.registrar(
+        fecha=date(2026, 9, 17),
+        tipo=TipoMovimiento.GASTO,
+        monto=50.0,
+        categoria_id=ids_catalogo["vivienda"],
+        cuenta_id=ids_catalogo["cuenta"],
+        descripcion="Café",
+        lugar="Starbucks Perisur",
+    )
+
+    assert len(servicio.buscar(texto="Perisur")) == 1

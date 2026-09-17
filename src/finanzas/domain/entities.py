@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, time
 
 from finanzas.domain.enums import (
     COBROS_POR_ANIO,
@@ -110,6 +110,12 @@ class Movimiento:
 
     #: Folio del banco, donde el documento lo trae.
     referencia_externa: str = ""
+
+    #: Dónde ocurrió. Texto libre: un comercio no es un catálogo.
+    lugar: str = ""
+
+    #: A qué hora, si se sabe. Ningún estado de cuenta la trae.
+    hora: time | None = None
 
     # ── Columnas derivadas (equivalentes a V:Y del Excel) ──
 

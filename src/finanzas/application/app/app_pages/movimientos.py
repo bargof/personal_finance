@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, time, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -70,7 +70,7 @@ registrar, explorar = st.tabs(["Registrar", "Explorar y editar"])
 
 with registrar:
     with st.container(border=True):
-        fila_1 = st.columns([1, 2, 1])
+        fila_1 = st.columns([1, 1, 2, 1])
 
         with fila_1[0]:
             fecha = st.date_input(
@@ -81,6 +81,14 @@ with registrar:
             )
 
         with fila_1[1]:
+            hora = st.time_input(
+                "Hora",
+                value=None,
+                step=300,
+                help="Opcional. Ningún estado de cuenta la trae.",
+            )
+
+        with fila_1[2]:
             tipo = st.segmented_control(
                 "Tipo",
                 [str(valor) for valor in TipoMovimiento],
@@ -88,7 +96,7 @@ with registrar:
                 key="mov_tipo",
             )
 
-        with fila_1[2]:
+        with fila_1[3]:
             monto = st.number_input(
                 "Monto", min_value=0.0, step=50.0, format="%.2f", key="mov_monto"
             )
@@ -154,9 +162,25 @@ with registrar:
                         icon=":material/swap_horiz:",
                     )
 
-        descripcion = st.text_input(
-            "Descripción", placeholder="Supermercado quincenal", key="mov_desc"
-        )
+        texto = st.columns([3, 2])
+
+        with texto[0]:
+            descripcion = st.text_input(
+                "Descripción", placeholder="Supermercado quincenal", key="mov_desc"
+            )
+
+        with texto[1]:
+            # Los lugares ya usados se ofrecen primero, por frecuencia: el
+            # súper de siempre no se teclea dos veces distinto.
+            lugares_previos = servicios.movimientos.lugares()
+            lugar = st.selectbox(
+                "Lugar",
+                ["", *lugares_previos],
+                accept_new_options=True,
+                placeholder="Walmart Universidad",
+                key="mov_lugar",
+            )
+            lugar = lugar or ""
 
         fila_3 = st.columns(3)
 
@@ -347,6 +371,8 @@ with registrar:
                     nota=nota,
                     estado=estado or str(EstadoMovimiento.CONFIRMADO),
                     fecha_pago=fecha_pago,
+                    lugar=lugar,
+                    hora=hora,
                 )
             except ValueError as error:
                 reportar_error(error)
@@ -469,10 +495,12 @@ with explorar:
             [
                 "id",
                 "fecha",
+                "hora",
                 "tipo",
                 "categoria",
                 "subcategoria",
                 "descripcion",
+                "lugar",
                 "cuenta",
                 "cuenta_destino",
                 "medio_pago",
@@ -490,10 +518,12 @@ with explorar:
         column_config={
             "id": st.column_config.NumberColumn("ID", width="small"),
             "fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
+            "hora": st.column_config.TextColumn("Hora", width="small"),
             "tipo": st.column_config.TextColumn("Tipo"),
             "categoria": st.column_config.TextColumn("Categoría"),
             "subcategoria": st.column_config.TextColumn("Subcategoría"),
             "descripcion": st.column_config.TextColumn("Descripción", width="medium"),
+            "lugar": st.column_config.TextColumn("Lugar"),
             "cuenta": st.column_config.TextColumn("Cuenta"),
             "cuenta_destino": st.column_config.TextColumn(
                 "Destino", help="Sólo en traspasos: a dónde llegó el dinero."
@@ -540,9 +570,7 @@ with explorar:
                 f"{moneda(float(deben['por_pagar'].sum()))}."
             )
 
-        lote = st.columns(2)
-
-        with lote[0]:
+        with st.container(horizontal=True):
             if not deben.empty and st.button(
                 "Marcar pagados hoy", type="primary", icon=":material/payments:"
             ):
@@ -555,7 +583,6 @@ with explorar:
                 )
                 st.rerun()
 
-        with lote[1]:
             if st.button(
                 "Eliminar seleccionados", type="secondary", icon=":material/delete:"
             ):
@@ -576,7 +603,7 @@ with explorar:
     with st.container(border=True):
         st.markdown(f"**Editar movimiento {movimiento_id}**")
 
-        edicion_1 = st.columns([1, 1, 1])
+        edicion_1 = st.columns([1, 1, 1, 1])
 
         with edicion_1[0]:
             nueva_fecha = st.date_input(
@@ -587,6 +614,17 @@ with explorar:
             )
 
         with edicion_1[1]:
+            hora_actual = actual["hora"]
+            nueva_hora = st.time_input(
+                "Hora",
+                value=time.fromisoformat(hora_actual)
+                if isinstance(hora_actual, str) and hora_actual
+                else None,
+                step=300,
+                key=f"edit_hora_{movimiento_id}",
+            )
+
+        with edicion_1[2]:
             nuevo_monto = st.number_input(
                 "Monto",
                 min_value=0.0,
@@ -596,7 +634,7 @@ with explorar:
                 key=f"edit_monto_{movimiento_id}",
             )
 
-        with edicion_1[2]:
+        with edicion_1[3]:
             nuevo_estado = st.selectbox(
                 "Estado",
                 [str(valor) for valor in EstadoMovimiento],
@@ -634,11 +672,31 @@ with explorar:
                 st.markdown("&nbsp;")
                 st.caption("Queda como adeudo generado.")
 
-        nueva_descripcion = st.text_input(
-            "Descripción",
-            value=actual["descripcion"],
-            key=f"edit_desc_{movimiento_id}",
-        )
+        texto_edicion = st.columns([3, 2])
+
+        with texto_edicion[0]:
+            nueva_descripcion = st.text_input(
+                "Descripción",
+                value=actual["descripcion"],
+                key=f"edit_desc_{movimiento_id}",
+            )
+
+        with texto_edicion[1]:
+            lugares_edicion = servicios.movimientos.lugares()
+            lugar_actual = actual["lugar"] or ""
+            opciones_lugar = ["", *lugares_edicion]
+            if lugar_actual and lugar_actual not in opciones_lugar:
+                opciones_lugar.insert(1, lugar_actual)
+            nuevo_lugar = st.selectbox(
+                "Lugar",
+                opciones_lugar,
+                index=opciones_lugar.index(lugar_actual)
+                if lugar_actual in opciones_lugar
+                else 0,
+                accept_new_options=True,
+                key=f"edit_lugar_{movimiento_id}",
+            )
+            nuevo_lugar = nuevo_lugar or ""
 
         if actual["descripcion_banco"]:
             pie = f"Del banco: **{actual['descripcion_banco']}**"
@@ -687,9 +745,7 @@ with explorar:
                 key=f"edit_cuenta_{movimiento_id}",
             )
 
-        acciones = st.columns(3)
-
-        with acciones[0]:
+        with st.container(horizontal=True):
             if st.button("Guardar cambios", type="primary", icon=":material/save:"):
                 try:
                     servicios.movimientos.actualizar(
@@ -702,6 +758,8 @@ with explorar:
                         cuenta_id=opciones_cuenta_edicion[nueva_cuenta],
                         fecha_pago=nueva_fecha_pago,
                         proyecto=nuevo_proyecto,
+                        lugar=nuevo_lugar,
+                        hora=nueva_hora,
                     )
                 except ValueError as error:
                     reportar_error(error)
@@ -709,6 +767,18 @@ with explorar:
                     invalidar_datos()
                     st.success("Movimiento actualizado.", icon=":material/check:")
                     st.rerun()
+
+            if st.button("Duplicar hoy", icon=":material/content_copy:"):
+                servicios.movimientos.duplicar(movimiento_id, date.today())
+                invalidar_datos()
+                st.success("Movimiento duplicado con la fecha de hoy.")
+                st.rerun()
+
+            if st.button("Eliminar", icon=":material/delete:"):
+                servicios.movimientos.eliminar(movimiento_id)
+                invalidar_datos()
+                st.success("Movimiento eliminado.", icon=":material/check:")
+                st.rerun()
 
         # El detalle de una compra de varias cosas. Vive aparte del
         # movimiento y no lo parte: sigue siendo un gasto con su categoría.
@@ -787,18 +857,4 @@ with explorar:
                 servicios.movimientos.marcar_pagado(movimiento_id)
                 invalidar_datos()
                 st.success("Movimiento marcado como pagado.", icon=":material/check:")
-                st.rerun()
-
-        with acciones[1]:
-            if st.button("Duplicar hoy", icon=":material/content_copy:"):
-                servicios.movimientos.duplicar(movimiento_id, date.today())
-                invalidar_datos()
-                st.success("Movimiento duplicado con la fecha de hoy.")
-                st.rerun()
-
-        with acciones[2]:
-            if st.button("Eliminar", icon=":material/delete:"):
-                servicios.movimientos.eliminar(movimiento_id)
-                invalidar_datos()
-                st.success("Movimiento eliminado.", icon=":material/check:")
                 st.rerun()

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, time, timedelta
 
 import pandas as pd
 
@@ -98,6 +98,8 @@ class Candidato:
     fecha_pago: date | None = None
 
     #: Campos que el documento no trae y el movimiento sí admite.
+    lugar: str = ""
+    hora: str = ""
     etiquetas: str = ""
     recurrente: bool = False
     planeado: bool = True
@@ -508,6 +510,8 @@ class ImportacionService:
             # conserva intacta para auditar contra el documento.
             descripcion_banco=candidato.origen.descripcion_banco,
             referencia_externa=candidato.origen.referencia,
+            lugar=candidato.lugar,
+            hora=time.fromisoformat(candidato.hora) if candidato.hora else None,
         )
 
         # Los productos son detalle del movimiento, no movimientos: cuelgan
@@ -602,6 +606,8 @@ def serializar(resultado: ResultadoImportacion) -> str:
                     "guardados": c.guardados,
                     "tipo_elegido": c.tipo_elegido,
                     "fecha_pago": _a_json(c.fecha_pago),
+                    "lugar": c.lugar,
+                    "hora": c.hora,
                     "etiquetas": c.etiquetas,
                     "recurrente": c.recurrente,
                     "planeado": c.planeado,
@@ -669,6 +675,8 @@ def deserializar(crudo: str) -> ResultadoImportacion:
                 guardados=list(crudo_candidato["guardados"]),
                 tipo_elegido=crudo_candidato.get("tipo_elegido", ""),
                 fecha_pago=_fecha_de(crudo_candidato.get("fecha_pago")),
+                lugar=crudo_candidato.get("lugar", ""),
+                hora=crudo_candidato.get("hora", ""),
                 etiquetas=crudo_candidato.get("etiquetas", ""),
                 recurrente=crudo_candidato.get("recurrente", False),
                 planeado=crudo_candidato.get("planeado", True),

@@ -36,6 +36,8 @@ _CAMPOS_ESCRITURA = (
     "fecha_pago",
     "descripcion_banco",
     "referencia_externa",
+    "lugar",
+    "hora",
 )
 
 
@@ -102,10 +104,10 @@ class MovimientosRepository:
         if texto:
             condiciones.append(
                 "(descripcion LIKE ? OR etiquetas LIKE ? OR nota LIKE ? "
-                "OR proyecto LIKE ? OR descripcion_banco LIKE ?)"
+                "OR proyecto LIKE ? OR descripcion_banco LIKE ? OR lugar LIKE ?)"
             )
             patron = f"%{texto}%"
-            parametros.extend([patron] * 5)
+            parametros.extend([patron] * 6)
 
         for columna, valores in (
             ("tipo", tipos),
@@ -218,6 +220,16 @@ class MovimientosRepository:
             ).fetchall()
 
         return {fila["referencia_externa"] for fila in filas}
+
+    def lugares(self) -> list[str]:
+        """Devuelve los lugares ya usados, para poblar el autocompletado."""
+        with connect(self._db_path) as conexion:
+            filas = conexion.execute(
+                "SELECT lugar, COUNT(*) AS n FROM movimientos "
+                "WHERE TRIM(lugar) <> '' GROUP BY lugar ORDER BY n DESC, lugar"
+            ).fetchall()
+
+        return [fila["lugar"] for fila in filas]
 
     def nombres_de_proyecto(self) -> list[str]:
         """Devuelve los proyectos ya usados, para poblar el autocompletado."""
@@ -388,6 +400,8 @@ def _a_valores(movimiento: Movimiento) -> list[object]:
         movimiento.fecha_pago.isoformat() if movimiento.fecha_pago else None,
         movimiento.descripcion_banco.strip(),
         movimiento.referencia_externa.strip(),
+        movimiento.lugar.strip(),
+        movimiento.hora.strftime("%H:%M") if movimiento.hora else None,
     ]
 
 

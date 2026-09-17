@@ -263,7 +263,7 @@ def test_saltar_no_guarda(base_ui):
     """Saltar un movimiento lo deja fuera de la base."""
     prueba = _asistente(base_ui)
 
-    _control(prueba, "button", "Saltar éste").click().run()
+    _control(prueba, "button", "Saltar").click().run()
 
     assert MovimientosService().buscar().empty
 

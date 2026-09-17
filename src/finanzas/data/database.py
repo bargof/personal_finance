@@ -100,6 +100,11 @@ CREATE TABLE IF NOT EXISTS movimientos (
     -- Folio del banco. Donde existe, dos movimientos con el mismo folio
     -- son el mismo movimiento, sin depender de fecha ni monto.
     referencia_externa TEXT NOT NULL DEFAULT '',
+    -- Dónde y a qué hora. El lugar es texto libre porque un comercio no
+    -- es un catálogo; la hora es opcional porque ningún estado de cuenta
+    -- la trae y capturarla a mano es un extra, no una obligación.
+    lugar           TEXT    NOT NULL DEFAULT '',
+    hora            TEXT,
     creado_en       TEXT    NOT NULL DEFAULT (datetime('now')),
     actualizado_en  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
@@ -337,6 +342,8 @@ SELECT
     m.medio_pago_id,
     COALESCE(mp.nombre, '')             AS medio_pago,
     m.descripcion,
+    m.lugar,
+    m.hora,
     m.descripcion_banco,
     m.referencia_externa,
     m.necesidad,
@@ -698,6 +705,8 @@ _COLUMNAS_NUEVAS: tuple[tuple[str, str, str], ...] = (
     ("movimientos", "cuenta_destino_id", "INTEGER REFERENCES cuentas(id)"),
     ("movimientos", "descripcion_banco", "TEXT NOT NULL DEFAULT ''"),
     ("movimientos", "referencia_externa", "TEXT NOT NULL DEFAULT ''"),
+    ("movimientos", "lugar", "TEXT NOT NULL DEFAULT ''"),
+    ("movimientos", "hora", "TEXT"),
 )
 
 #: Relleno que corre una sola vez, justo tras añadir una columna.

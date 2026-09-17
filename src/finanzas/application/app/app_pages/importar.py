@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import time
+
 import streamlit as st
 
 from finanzas.application.app.components import (
@@ -448,9 +450,7 @@ if st.session_state.get("paso") == "revisar":
         f"{moneda(sum(c.origen.monto for c in seleccionados))}."
     )
 
-    acciones = st.columns([1, 1, 3])
-
-    with acciones[0]:
+    with st.container(horizontal=True):
         if st.button(
             "Completar información",
             type="primary",
@@ -462,7 +462,6 @@ if st.session_state.get("paso") == "revisar":
             _recordar("completar")
             st.rerun()
 
-    with acciones[1]:
         if st.button("Empezar de nuevo", icon=":material/restart_alt:"):
             _reiniciar()
             st.rerun()
@@ -516,7 +515,7 @@ if st.session_state.get("paso") == "completar":
             st.metric("Cobro", moneda(origen.monto, decimales=2))
 
     with st.container(border=True):
-        fila_1 = st.columns([1, 2, 1])
+        fila_1 = st.columns([1, 1, 2, 1])
 
         with fila_1[0]:
             # Fecha y monto no se editan: son lo que el banco va a repetir
@@ -535,6 +534,19 @@ if st.session_state.get("paso") == "completar":
             )
 
         with fila_1[1]:
+            # La hora sí se captura: ningún banco la trae, así que si la
+            # sabes, aquí va.
+            hora = st.time_input(
+                "Hora",
+                value=time.fromisoformat(candidato.hora) if candidato.hora else None,
+                step=300,
+                help="Opcional. El estado de cuenta no la trae.",
+                key=f"hora_{indice}",
+                persist_state="session",
+            )
+            candidato.hora = hora.strftime("%H:%M") if hora else ""
+
+        with fila_1[2]:
             tipos = [str(valor) for valor in TipoMovimiento]
             tipo = st.segmented_control(
                 "Tipo",
@@ -550,7 +562,7 @@ if st.session_state.get("paso") == "completar":
             )
             candidato.tipo_elegido = tipo or candidato.tipo_sugerido
 
-        with fila_1[2]:
+        with fila_1[3]:
             # Tampoco se edita: junto con la fecha, es lo que identifica
             # el movimiento frente al documento.
             st.number_input(
@@ -655,17 +667,38 @@ if st.session_state.get("paso") == "completar":
         else:
             candidato.cuenta_destino_id = None
 
-        candidato.descripcion = st.text_input(
-            "Descripción",
-            value=candidato.descripcion or origen.descripcion_banco,
-            placeholder="Supermercado quincenal",
-            help=(
-                "Cómo lo describirías tú. Puedes cambiarla sin perder nada: "
-                "el concepto del banco se guarda en su propia columna."
-            ),
-            key=f"desc_{indice}",
-            persist_state="session",
-        )
+        texto = st.columns([3, 2])
+
+        with texto[0]:
+            candidato.descripcion = st.text_input(
+                "Descripción",
+                value=candidato.descripcion or origen.descripcion_banco,
+                placeholder="Supermercado quincenal",
+                help=(
+                    "Cómo lo describirías tú. Puedes cambiarla sin perder nada: "
+                    "el concepto del banco se guarda en su propia columna."
+                ),
+                key=f"desc_{indice}",
+                persist_state="session",
+            )
+
+        with texto[1]:
+            lugares_previos = servicios.movimientos.lugares()
+            opciones_lugar = ["", *lugares_previos]
+            if candidato.lugar and candidato.lugar not in opciones_lugar:
+                opciones_lugar.insert(1, candidato.lugar)
+            lugar = st.selectbox(
+                "Lugar",
+                opciones_lugar,
+                index=opciones_lugar.index(candidato.lugar)
+                if candidato.lugar in opciones_lugar
+                else 0,
+                accept_new_options=True,
+                placeholder="Walmart Universidad",
+                key=f"lugar_{indice}",
+                persist_state="session",
+            )
+            candidato.lugar = lugar or ""
 
         fila_3 = st.columns(3)
 
@@ -841,16 +874,10 @@ if st.session_state.get("paso") == "completar":
             icon=":material/balance:",
         )
 
-    navegacion = st.columns([1, 1, 1, 3])
-
-    with navegacion[0]:
-        if st.button("Anterior", icon=":material/arrow_back:", disabled=indice == 0):
-            _guardar_actual(candidato)
-            st.session_state["indice"] = indice - 1
-            _recordar()
-            st.rerun()
-
-    with navegacion[1]:
+    # Un contenedor horizontal hace wrap en el teléfono en vez de apilar
+    # las columnas una debajo de otra. Siguiente va primero: es lo que el
+    # pulgar busca.
+    with st.container(horizontal=True):
         # Avanzar más allá del último no cierra la edición: dar la vuelta
         # entera es normal cuando se corrige algo, y sólo «Terminar»
         # decide que ya está.
@@ -860,8 +887,13 @@ if st.session_state.get("paso") == "completar":
             _recordar()
             st.rerun()
 
-    with navegacion[2]:
-        if st.button("Saltar éste", icon=":material/skip_next:"):
+        if st.button("Anterior", icon=":material/arrow_back:", disabled=indice == 0):
+            _guardar_actual(candidato)
+            st.session_state["indice"] = indice - 1
+            _recordar()
+            st.rerun()
+
+        if st.button("Saltar", icon=":material/skip_next:"):
             # Saltar significa lo mismo antes y después de haber guardado:
             # si ya estaba en la base, sale de ella.
             candidato.incluir = False
@@ -870,7 +902,6 @@ if st.session_state.get("paso") == "completar":
             _recordar()
             st.rerun()
 
-    with navegacion[3]:
         if st.button("Terminar", icon=":material/task_alt:"):
             _guardar_actual(candidato)
             st.session_state["paso"] = "guardar"
@@ -924,9 +955,7 @@ if st.session_state.get("paso") == "guardar" and not st.session_state.get("termi
             icon=":material/info:",
         )
 
-    cierre = st.columns([1, 1, 3])
-
-    with cierre[0]:
+    with st.container(horizontal=True):
         if st.button(
             "Cerrar importación", type="primary", icon=":material/check_circle:"
         ):
@@ -935,7 +964,6 @@ if st.session_state.get("paso") == "guardar" and not st.session_state.get("termi
             invalidar_datos()
             st.rerun()
 
-    with cierre[1]:
         if st.button("Volver al detalle", icon=":material/arrow_back:"):
             st.session_state["paso"] = "completar"
             _recordar("completar")

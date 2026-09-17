@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, time
 
 import pandas as pd
 
@@ -88,6 +88,10 @@ class MovimientosService:
         """Devuelve los proyectos ya usados, para reutilizarlos al capturar."""
         return self._repo.nombres_de_proyecto()
 
+    def lugares(self) -> list[str]:
+        """Devuelve los lugares ya usados, del más frecuente al menos."""
+        return self._repo.lugares()
+
     def referencias_externas(self, referencias: list[str]) -> set[str]:
         """Devuelve cuáles de esos folios de banco ya están registrados."""
         return self._repo.referencias_externas(referencias)
@@ -144,6 +148,8 @@ class MovimientosService:
         fecha_pago: date | None | _SinEspecificar = _SIN_FECHA_PAGO,
         descripcion_banco: str = "",
         referencia_externa: str = "",
+        lugar: str = "",
+        hora: time | None = None,
     ) -> int:
         """
         Registra un movimiento nuevo.
@@ -190,6 +196,8 @@ class MovimientosService:
             fecha_pago=fecha_pago,
             descripcion_banco=descripcion_banco,
             referencia_externa=referencia_externa,
+            lugar=lugar,
+            hora=hora,
         )
 
         movimiento_id = self._repo.crear(movimiento)
@@ -244,6 +252,8 @@ class MovimientosService:
             # banco: son dos campos con dos propósitos.
             "descripcion_banco": actual["descripcion_banco"],
             "referencia_externa": actual["referencia_externa"],
+            "lugar": actual["lugar"],
+            "hora": _hora_o_nulo(actual["hora"]),
         }
         datos.update(campos)
 
@@ -278,6 +288,7 @@ class MovimientosService:
             etiquetas=actual["etiquetas"],
             nota=actual["nota"],
             estado=actual["estado"],
+            lugar=actual["lugar"],
             # La copia nace sin pagar: repetir el gasto no repite su pago.
             fecha_pago=None,
             # Y sin rastro del banco: la copia no salió de ningún estado
@@ -343,6 +354,8 @@ def _construir(**datos: object) -> Movimiento:
         fecha_pago=datos.get("fecha_pago"),  # type: ignore[arg-type]
         descripcion_banco=str(datos.get("descripcion_banco") or ""),
         referencia_externa=str(datos.get("referencia_externa") or ""),
+        lugar=str(datos.get("lugar") or ""),
+        hora=_hora_o_nulo(datos.get("hora")),
     )
     _validar(movimiento)
 
@@ -387,6 +400,21 @@ def _validar(movimiento: Movimiento) -> None:
                 "El origen y el destino de una transferencia no pueden ser "
                 "la misma cuenta."
             )
+
+
+def _hora_o_nulo(valor: object) -> time | None:
+    """Convierte «HH:MM» a `time`, cuidando nulos y valores ya convertidos."""
+    if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+        return None
+    if isinstance(valor, time):
+        return valor
+    texto = str(valor).strip()
+    if not texto or texto == "None":
+        return None
+    try:
+        return time.fromisoformat(texto)
+    except ValueError:
+        return None
 
 
 def _fecha_o_nulo(valor: object) -> date | None:
