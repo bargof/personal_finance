@@ -6,12 +6,11 @@ versiona junto al código para que arrancar la app no dependa de generarlo.
 
     poetry run python scripts/generar_favicon.py
 
-Lleva el acento vino de la aplicación, pero invertido respecto a la
-interfaz: aquí el vino es el fondo y el signo va en blanco. A dieciséis
-píxeles gana la masa de color, y un símbolo fino sobre carbón se pierde
-—más aún en una pestaña de navegador oscura, donde el fondo del icono se
-confunde con el del navegador—. Por lo mismo no lleva halo ni borde: a
-ese tamaño sólo restarían píxeles al signo.
+Lleva el acento de la aplicación como fondo y el signo en carbón. A
+dieciséis píxeles gana la masa de color, y un símbolo fino sobre carbón
+se pierde —más aún en una pestaña de navegador oscura, donde el fondo del
+icono se confunde con el del navegador—. Por lo mismo no lleva halo ni
+borde: a ese tamaño sólo restarían píxeles al signo.
 """
 
 from __future__ import annotations
@@ -32,9 +31,10 @@ DESTINO = (
     / "favicon.png"
 )
 
-#: El acento de la aplicación, que aquí hace de fondo.
-VINO = (212, 11, 69, 255)
-BLANCO = (255, 255, 255, 255)
+#: El acento de la aplicación, que aquí hace de fondo. El signo va en
+#: carbón y no en blanco: sobre un verde claro, el oscuro contrasta más.
+ACENTO = (138, 212, 191, 255)
+CARBON = (15, 18, 22, 255)
 
 #: Fuentes con las que el signo de peso se ve bien de bold. Se prueba en
 #: orden y se usa la primera que exista; si no hay ninguna, el signo se
@@ -70,7 +70,7 @@ def dibujar() -> Image.Image:
     pincel.rounded_rectangle(
         [margen, margen, LIENZO - margen, LIENZO - margen],
         radius=LIENZO // 6,
-        fill=VINO,
+        fill=ACENTO,
     )
 
     simbolo = Image.new("RGBA", (LIENZO, LIENZO), (0, 0, 0, 0))
@@ -84,7 +84,7 @@ def dibujar() -> Image.Image:
             (LIENZO // 2, LIENZO // 2 - LIENZO // 40),
             "$",
             font=fuente,
-            fill=BLANCO,
+            fill=CARBON,
             anchor="mm",
         )
     else:
@@ -110,20 +110,20 @@ def _signo_a_mano(trazo: ImageDraw.ImageDraw) -> None:
         [centro - ancho, centro - alto, centro + ancho, centro],
         start=20,
         end=200,
-        fill=BLANCO,
+        fill=CARBON,
         width=grosor,
     )
     trazo.arc(
         [centro - ancho, centro, centro + ancho, centro + alto],
         start=200,
         end=20,
-        fill=BLANCO,
+        fill=CARBON,
         width=grosor,
     )
     # El asta vertical que lo convierte en signo de moneda.
     trazo.line(
         [(centro, centro - alto - grosor), (centro, centro + alto + grosor)],
-        fill=BLANCO,
+        fill=CARBON,
         width=grosor // 2,
     )
 

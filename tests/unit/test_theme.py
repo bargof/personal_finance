@@ -19,9 +19,13 @@ from finanzas.application.app import theme
 def _hoja(paleta: theme.Paleta) -> str:
     """Devuelve la hoja de estilos ya resuelta para una paleta."""
     hoja = theme._ESTILOS.replace("@@ACENTO@@", paleta.acento)
-    for porcentaje in (12, 28, 45, 55, 70):
+    for porcentaje in range(100, 0, -1):
         hoja = hoja.replace(
-            f"@@ACENTO_{porcentaje}@@", theme._con_alfa(paleta.acento, porcentaje)
+            f"@@ACENTO_LUZ_{porcentaje:02d}@@",
+            theme._con_alfa(paleta.acento_luz, porcentaje),
+        )
+        hoja = hoja.replace(
+            f"@@ACENTO_{porcentaje:02d}@@", theme._con_alfa(paleta.acento, porcentaje)
         )
 
     return hoja
@@ -33,22 +37,36 @@ def test_no_queda_ningun_marcador_sin_sustituir(paleta):
     assert "@@" not in _hoja(paleta)
 
 
-def test_los_marcadores_del_css_estan_todos_cubiertos():
+def test_los_marcadores_del_css_llevan_dos_cifras():
     """
-    La lista de opacidades cubre lo que la hoja realmente usa.
+    «ACENTO_14» no debe poder confundirse con «ACENTO_1».
 
-    Agregar `@@ACENTO_90@@` al CSS sin agregar 90 a la lista dejaría esa
-    regla muerta, y la única señal sería que el halo deja de verse.
+    Con opacidades de una cifra, sustituir «@@ACENTO_1@@» dentro de
+    «@@ACENTO_14@@» dejaría basura; con dos cifras fijas no hay prefijo
+    común.
     """
-    usados = set(re.findall(r"@@ACENTO_(\d+)@@", theme._ESTILOS))
+    usados = re.findall(r"@@ACENTO(?:_LUZ)?_(\d+)@@", theme._ESTILOS)
 
-    assert usados == {"12", "28", "45", "55", "70"}
+    assert usados, "el CSS no usa el acento"
+    assert all(len(cifras) == 2 for cifras in usados)
+
+
+def test_el_cristal_desenfoca_algo():
+    """
+    Sin manchas de luz en el fondo, el cristal es sólo un panel gris.
+
+    El desenfoque necesita algo detrás; lo que hay detrás son los
+    degradados del fondo, que usan la luz del acento.
+    """
+    assert "backdrop-filter" in theme._ESTILOS
+    assert "radial-gradient" in theme._ESTILOS
+    assert "@@ACENTO_LUZ_" in theme._ESTILOS
 
 
 def test_el_acento_se_traduce_a_rgba():
     """El halo necesita opacidad, y un hexadecimal de seis cifras no la tiene."""
-    assert theme._con_alfa("#ff1f5a", 45) == "rgba(255, 31, 90, 0.45)"
-    assert theme._con_alfa("#ff1f5a", 100) == "rgba(255, 31, 90, 1.00)"
+    assert theme._con_alfa("#8ad4bf", 45) == "rgba(138, 212, 191, 0.45)"
+    assert theme._con_alfa("#8ad4bf", 100) == "rgba(138, 212, 191, 1.00)"
 
 
 def test_cada_tema_trae_su_acento():

@@ -53,11 +53,11 @@ class Paleta:
 
 
 OSCURA = Paleta(
-    acento="#d40b45",
-    acento_luz="#ff2e63",
-    serie_1="#e8134e",
+    acento="#8ad4bf",
+    acento_luz="#a8f0da",
+    serie_1="#8ad4bf",
     serie_2="#f0883e",
-    serie_3="#4fd1c5",
+    serie_3="#7aa2f7",
     eje="#39424f",
     reticula="#1e242c",
     texto_tenue="#8b949e",
@@ -69,9 +69,9 @@ OSCURA = Paleta(
 )
 
 CLARA = Paleta(
-    acento="#b00840",
-    acento_luz="#d4004f",
-    serie_1="#b00840",
+    acento="#1f8a6b",
+    acento_luz="#2fb08a",
+    serie_1="#1f8a6b",
     serie_2="#eb6834",
     serie_3="#1baf7a",
     eje="#c9c6be",
@@ -103,34 +103,89 @@ def paleta() -> Paleta:
 # ═══════════════════════════════════════════════════════════
 # Estilos
 #
-# Sólo lo que no es una opción de `config.toml`: densidad del
-# lienzo, jerarquía de las pestañas y el halo del acento.
+# Cristal: paneles translúcidos que desenfocan manchas de luz
+# puestas en el fondo. Sin esas manchas no habría nada que
+# desenfocar y el cristal sería sólo un gris. El acento va en
+# el botón primario —iluminado desde dentro— y en los halos.
 #
 # El color del acento se sustituye desde la paleta en vez de
 # leerse de una variable CSS, para no depender de qué nombres
 # publique Streamlit por dentro, que cambian entre versiones.
-# Los marcadores son `@@ACENTO@@` y no llaves porque `format`
+# Los marcadores son `@@ACENTO_NN@@` y `@@ACENTO_LUZ_NN@@`, con
+# la opacidad en dos cifras, y no llaves porque `format`
 # chocaría con las llaves de las propias reglas CSS.
 # ═══════════════════════════════════════════════════════════
 
 _ESTILOS = """
 <style>
-/* El encabezado flotante sólo estorba: la navegación está en la barra
-   lateral y el título, en la página. */
+/* ═══════════════════════════════════════════════════════════
+   Cristal
+   ═══════════════════════════════════════════════════════════ */
+
+/* El cristal necesita algo detrás que difuminar: sobre un fondo plano un
+   panel translúcido es sólo un panel gris. Estas manchas de luz —del
+   acento y de un azul frío— son lo que los paneles desenfocan. Van
+   fijas para que no se muevan con el scroll. */
+.stApp, [data-testid="stAppViewContainer"] {
+    background:
+        radial-gradient(ellipse 55% 45% at 12% 8%,  @@ACENTO_LUZ_14@@, transparent 62%),
+        radial-gradient(ellipse 45% 40% at 88% 88%, @@ACENTO_LUZ_09@@, transparent 60%),
+        radial-gradient(ellipse 35% 35% at 70% 25%,
+                        rgba(122, 162, 247, 0.07), transparent 60%),
+        radial-gradient(ellipse 40% 30% at 30% 75%,
+                        rgba(255, 255, 255, 0.025), transparent 60%),
+        #0f1216;
+    background-attachment: fixed;
+}
+
+/* Un panel de cristal: fondo apenas lechoso, desenfoque de lo que hay
+   detrás, un borde fino que capta luz y una arista superior más clara,
+   que es lo que hace que el ojo lea «vidrio» y no «caja gris». La clase
+   `cristal` la pone el script a los contenedores con borde. */
+.cristal,
+[data-testid="stMetric"],
+[data-testid="stExpander"] > details {
+    background: rgba(255, 255, 255, 0.038) !important;
+    -webkit-backdrop-filter: blur(18px) saturate(150%);
+    backdrop-filter: blur(18px) saturate(150%);
+    border: 1px solid rgba(255, 255, 255, 0.09) !important;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.07),
+        0 10px 36px rgba(0, 0, 0, 0.28);
+}
+
+[data-testid="stSidebar"] > div:first-child {
+    background: rgba(9, 11, 14, 0.55);
+    -webkit-backdrop-filter: blur(24px) saturate(140%);
+    backdrop-filter: blur(24px) saturate(140%);
+    border-right: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* Los campos también son vidrio, un poco más hundido que los paneles. */
+[data-baseweb="input"], [data-baseweb="textarea"], [data-baseweb="select"] > div,
+.stNumberInput > div > div, .stDateInput > div > div, .stTimeInput > div > div {
+    background: rgba(255, 255, 255, 0.03) !important;
+    border-color: rgba(255, 255, 255, 0.10) !important;
+}
+[data-baseweb="input"]:focus-within, [data-baseweb="textarea"]:focus-within,
+[data-baseweb="select"] > div:focus-within {
+    border-color: @@ACENTO_55@@ !important;
+    box-shadow: 0 0 0 1px @@ACENTO_35@@, 0 0 18px @@ACENTO_LUZ_20@@;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Lienzo
+   ═══════════════════════════════════════════════════════════ */
+
 header[data-testid="stHeader"] {
     background: transparent;
     height: 2.5rem;
 }
-
-/* Streamlit reserva arriba un espacio pensado para una portada. Esto es
-   un tablero: ese aire se gana devolviéndolo al contenido. */
 .stMainBlockContainer {
     padding-top: 2.5rem;
     padding-bottom: 4rem;
     max-width: 1400px;
 }
-
-/* Un título de página no necesita competir con los datos. */
 .stMainBlockContainer h1 {
     letter-spacing: -0.02em;
     margin-bottom: 0.15rem;
@@ -139,27 +194,24 @@ header[data-testid="stHeader"] {
 .stMainBlockContainer h3 {
     letter-spacing: -0.01em;
 }
-
-/* El pie de cada título: el texto explicativo se lee como nota, no como
-   contenido de primer nivel. */
 .stMainBlockContainer h1 + div [data-testid="stCaptionContainer"] {
     max-width: 62ch;
 }
 
-/* ── Tarjetas ──────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════
+   Tarjetas de métrica
+   ═══════════════════════════════════════════════════════════ */
 
-/* Contenedores y métricas con borde comparten el mismo lenguaje: una
-   superficie apenas elevada, sin sombra dura. */
 [data-testid="stMetric"] {
     padding: 0.9rem 1.1rem;
     transition: border-color 140ms ease, box-shadow 140ms ease;
 }
 [data-testid="stMetric"]:hover {
-    border-color: @@ACENTO_45@@;
-    box-shadow: 0 0 18px @@ACENTO_12@@;
+    border-color: @@ACENTO_45@@ !important;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.09),
+        0 0 22px @@ACENTO_LUZ_14@@;
 }
-
-/* La etiqueta de la métrica, en versalita tenue: el número manda. */
 [data-testid="stMetricLabel"] {
     opacity: 0.72;
     font-size: 0.78rem;
@@ -175,12 +227,13 @@ header[data-testid="stHeader"] {
     font-size: 0.8rem;
 }
 
-/* ── Pestañas ──────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════
+   Pestañas
+   ═══════════════════════════════════════════════════════════ */
 
-/* Subrayado fino en vez del bloque de color por defecto. */
 .stTabs [data-baseweb="tab-list"] {
     gap: 1.6rem;
-    border-bottom: 1px solid var(--border-color);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 .stTabs [data-baseweb="tab"] {
     padding: 0.5rem 0;
@@ -188,76 +241,99 @@ header[data-testid="stHeader"] {
 }
 .stTabs [data-baseweb="tab-highlight"] {
     height: 2px;
-    box-shadow: 0 0 10px @@ACENTO_70@@;
+    box-shadow: 0 0 10px @@ACENTO_LUZ_70@@;
 }
 
-/* ── Controles ─────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════
+   Controles
+   ═══════════════════════════════════════════════════════════ */
 
-/* El botón primario es el único elemento con relleno de acento en
-   pantalla, así que se nota sin necesitar tamaño. El halo es lo que lo
-   hace leer como neón: un color saturado sin luz alrededor sólo se ve
-   chillón. */
+/* El botón primario es cristal iluminado desde dentro: el acento con
+   algo de transparencia, texto oscuro encima, arista clara arriba y el
+   halo alrededor. Es el único relleno fuerte de la pantalla. */
 .stButton button[kind="primary"],
 .stFormSubmitButton button[kind="primary"] {
-    font-weight: 600;
-    box-shadow: 0 0 0 1px @@ACENTO_45@@, 0 2px 16px @@ACENTO_28@@;
+    background: linear-gradient(135deg, @@ACENTO_92@@, @@ACENTO_78@@);
+    color: #0f1216;
+    font-weight: 650;
+    border: 1px solid @@ACENTO_LUZ_55@@;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.35),
+        0 0 0 1px @@ACENTO_LUZ_20@@,
+        0 4px 22px @@ACENTO_LUZ_28@@;
     transition: box-shadow 140ms ease, filter 140ms ease, transform 120ms ease;
 }
 .stButton button[kind="primary"]:hover,
 .stFormSubmitButton button[kind="primary"]:hover {
     filter: brightness(1.06);
-    box-shadow: 0 0 0 1px @@ACENTO_70@@, 0 3px 24px @@ACENTO_45@@;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.4),
+        0 0 0 1px @@ACENTO_LUZ_45@@,
+        0 6px 30px @@ACENTO_LUZ_45@@;
+}
+.stButton button[kind="primary"] p,
+.stFormSubmitButton button[kind="primary"] p {
+    color: #0f1216;
 }
 
-/* El foco se marca con el mismo halo: el teclado merece la misma pista
-   visual que el ratón. */
-.stButton button:focus-visible,
-.stFormSubmitButton button:focus-visible,
-.stSelectbox [data-baseweb="select"]:focus-within,
-.stTextInput input:focus,
-.stNumberInput input:focus {
-    box-shadow: 0 0 0 2px @@ACENTO_55@@, 0 0 16px @@ACENTO_28@@;
+/* El secundario es cristal sin luz propia. */
+.stButton button[kind="secondary"],
+.stFormSubmitButton button[kind="secondary"] {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+}
+.stButton button[kind="secondary"]:hover,
+.stFormSubmitButton button[kind="secondary"]:hover {
+    border-color: @@ACENTO_45@@;
+    background: rgba(255, 255, 255, 0.06);
 }
 .stButton button:active,
 .stFormSubmitButton button:active {
     transform: translateY(1px);
 }
-
-/* Un expander cerrado es mobiliario; sólo se define al abrirse. */
+.stButton button:focus-visible,
+.stFormSubmitButton button:focus-visible {
+    box-shadow: 0 0 0 2px @@ACENTO_55@@, 0 0 16px @@ACENTO_LUZ_28@@;
+}
 .stExpander summary:hover {
     color: @@ACENTO@@;
 }
 
-/* ── Barra lateral ─────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════
+   Barra lateral
+   ═══════════════════════════════════════════════════════════ */
 
-/* La navegación se lee como índice: entradas compactas y el activo
-   marcado por peso, no sólo por fondo. */
 [data-testid="stSidebarNav"] a {
     border-radius: 0.5rem;
 }
 [data-testid="stSidebarNav"] a[aria-current="page"] span {
     font-weight: 600;
 }
-
-/* Una barra de acento en la página activa: el neón marca dónde estás. */
 [data-testid="stSidebarNav"] a[aria-current="page"] {
+    background: @@ACENTO_12@@;
     box-shadow: inset 2px 0 0 @@ACENTO@@;
 }
 
-/* ── Tablas ────────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════
+   Tablas
+   ═══════════════════════════════════════════════════════════ */
 
-/* El encabezado se separa del cuerpo por peso y caja, no por una regla
-   más: la retícula ya tiene suficientes líneas. */
 .stDataFrame thead th {
     font-weight: 600;
     letter-spacing: 0.01em;
 }
+[data-testid="stDataFrame"], [data-testid="stDataEditor"] {
+    border-radius: 0.7rem;
+    overflow: hidden;
+}
 
-/* ── Botones en grupo ──────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════
+   Botones en grupo
+   ═══════════════════════════════════════════════════════════ */
 
-/* Un grupo de acciones se lee como una fila, también en el teléfono:
-   el contenedor horizontal hace wrap en vez de apilar. Los botones
-   crecen para repartirse el ancho y no quedar como fichas sueltas. */
 [data-testid="stHorizontalBlock"] .stButton,
 [data-testid="stHorizontalBlock"] .stFormSubmitButton {
     flex: 1 1 auto;
@@ -267,12 +343,11 @@ header[data-testid="stHeader"] {
     width: 100%;
 }
 
-/* ── Teléfono ──────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════
+   Teléfono
+   ═══════════════════════════════════════════════════════════ */
 
 @media (max-width: 640px) {
-    /* iOS hace zoom solo al enfocar un campo cuyo texto mide menos de
-       16px. Es la única causa del brinco al tocar un campo, y la única
-       cura que respeta la accesibilidad: subir el texto, no bloquear. */
     input, select, textarea,
     .stTextInput input, .stNumberInput input, .stTextArea textarea,
     .stSelectbox [data-baseweb="select"] *,
@@ -280,19 +355,14 @@ header[data-testid="stHeader"] {
     [data-baseweb="input"] input, [data-baseweb="textarea"] textarea {
         font-size: 16px !important;
     }
-
-    /* Menos aire lateral: cada píxel cuenta en una pantalla angosta. */
     .stMainBlockContainer {
         padding-left: 0.9rem;
         padding-right: 0.9rem;
         padding-top: 1.2rem;
     }
-
     .stMainBlockContainer h1 { font-size: 1.45rem; }
     .stMainBlockContainer h2 { font-size: 1.15rem; }
     .stMainBlockContainer h3 { font-size: 1rem; }
-
-    /* Dos métricas por fila, no una torre de cinco. */
     [data-testid="stHorizontalBlock"] > [data-testid="stMetric"],
     [data-testid="stHorizontalBlock"] > div:has(> [data-testid="stMetric"]) {
         flex: 1 1 calc(50% - 0.5rem);
@@ -300,23 +370,15 @@ header[data-testid="stHeader"] {
     }
     [data-testid="stMetricValue"] { font-size: 1.35rem; }
     [data-testid="stMetricLabel"] { font-size: 0.7rem; }
-
-    /* Botones con altura de dedo, no de cursor. */
     .stButton > button, .stFormSubmitButton > button {
         min-height: 2.75rem;
         padding-top: 0.55rem;
         padding-bottom: 0.55rem;
     }
-
-    /* El primario, a todo lo ancho: es la acción que buscas con el
-       pulgar. */
     .stButton > button[kind="primary"],
     .stFormSubmitButton > button[kind="primary"] {
         width: 100%;
     }
-
-    /* Pestañas y control segmentado: que se deslicen, no que se
-       encimen. */
     .stTabs [data-baseweb="tab-list"] {
         gap: 1rem;
         overflow-x: auto;
@@ -324,10 +386,14 @@ header[data-testid="stHeader"] {
     }
     .stTabs [data-baseweb="tab"] { white-space: nowrap; }
     [data-testid="stSegmentedControl"] { overflow-x: auto; }
-
-    /* Los contenedores con borde pierden margen interno. */
     [data-testid="stVerticalBlockBorderWrapper"] > div {
         padding: 0.75rem;
+    }
+    /* El desenfoque es caro en el teléfono: menos radio, mismo efecto. */
+    .cristal, [data-testid="stMetric"], [data-testid="stExpander"] > details,
+    [data-testid="stSidebar"] > div:first-child {
+        -webkit-backdrop-filter: blur(12px) saturate(140%);
+        backdrop-filter: blur(12px) saturate(140%);
     }
 }
 </style>
@@ -352,16 +418,42 @@ _VIEWPORT = """
 (function () {
     try {
         var doc = window.parent.document;
-        if (doc.documentElement.dataset.viewportFijo) { return; }
-        var meta = doc.querySelector('meta[name="viewport"]');
-        if (!meta) {
-            meta = doc.createElement('meta');
-            meta.name = 'viewport';
-            doc.head.appendChild(meta);
+
+        // Viewport sin zoom de dedos. Streamlit pone la etiqueta y no la
+        // expone, así que se reescribe una sola vez.
+        if (!doc.documentElement.dataset.viewportFijo) {
+            var meta = doc.querySelector('meta[name="viewport"]');
+            if (!meta) {
+                meta = doc.createElement('meta');
+                meta.name = 'viewport';
+                doc.head.appendChild(meta);
+            }
+            meta.content = 'width=device-width, initial-scale=1, ' +
+                           'maximum-scale=1, user-scalable=no, viewport-fit=cover';
+            doc.documentElement.dataset.viewportFijo = '1';
         }
-        meta.content = 'width=device-width, initial-scale=1, ' +
-                       'maximum-scale=1, user-scalable=no, viewport-fit=cover';
-        doc.documentElement.dataset.viewportFijo = '1';
+
+        // `st.container(border=True)` y el contenedor sin borde son el
+        // mismo elemento en el HTML; sólo los distingue el estilo. Se
+        // marcan como cristal los que tienen borde, y se vuelve a mirar
+        // en cada cambio porque Streamlit reconstruye el árbol al rerun.
+        function marcar() {
+            var nodos = doc.querySelectorAll(
+                '[data-testid="stVerticalBlockBorderWrapper"]:not(.cristal)'
+            );
+            for (var i = 0; i < nodos.length; i++) {
+                var estilo = doc.defaultView.getComputedStyle(nodos[i]);
+                if (parseFloat(estilo.borderTopWidth) > 0) {
+                    nodos[i].classList.add('cristal');
+                }
+            }
+        }
+        marcar();
+        if (!doc.documentElement.dataset.cristalObservado) {
+            new doc.defaultView.MutationObserver(marcar)
+                .observe(doc.body, { childList: true, subtree: true });
+            doc.documentElement.dataset.cristalObservado = '1';
+        }
     } catch (e) { /* fuera de un navegador no hay documento padre */ }
 })();
 </script>
@@ -375,10 +467,20 @@ def aplicar_estilos() -> None:
     Se llama una vez por rerun, antes de dibujar nada. El acento se
     sustituye aquí para que el halo siga al tema activo.
     """
-    acento = paleta().acento
-    hoja = _ESTILOS.replace("@@ACENTO@@", acento)
-    for porcentaje in (12, 28, 45, 55, 70):
-        hoja = hoja.replace(f"@@ACENTO_{porcentaje}@@", _con_alfa(acento, porcentaje))
+    activa = paleta()
+    hoja = _ESTILOS.replace("@@ACENTO@@", activa.acento)
+    # Dos familias de marcador: el acento —relleno, bordes, texto— y su
+    # luz —halos y manchas de fondo—, cada una con la opacidad que el CSS
+    # pida. Los marcadores llevan dos cifras para que «ACENTO_14» no se
+    # confunda con «ACENTO_1».
+    for porcentaje in range(100, 0, -1):
+        hoja = hoja.replace(
+            f"@@ACENTO_LUZ_{porcentaje:02d}@@",
+            _con_alfa(activa.acento_luz, porcentaje),
+        )
+        hoja = hoja.replace(
+            f"@@ACENTO_{porcentaje:02d}@@", _con_alfa(activa.acento, porcentaje)
+        )
 
     st.html(hoja)
 
