@@ -49,7 +49,7 @@ metricValueFontWeight = 600
 [theme.dark]
 backgroundColor = "#0f1216"
 secondaryBackgroundColor = "#171c23"
-textColor = "#e6e9ee"
+textColor = "#eef1f4"
 borderColor = "#242b35"
 # Verde grisáceo metálico, con un halo más encendido en `theme.py`. La
 # saturación va contenida a propósito (46%): más arriba se vuelve menta y

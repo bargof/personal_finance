@@ -128,10 +128,10 @@ _ESTILOS = """
    fijas para que no se muevan con el scroll. */
 .stApp, [data-testid="stAppViewContainer"] {
     background:
-        radial-gradient(ellipse 60% 50% at 10% 5%,  @@ACENTO_LUZ_26@@, transparent 60%),
-        radial-gradient(ellipse 50% 45% at 90% 92%, @@ACENTO_LUZ_18@@, transparent 58%),
+        radial-gradient(ellipse 60% 50% at 10% 5%,  @@ACENTO_LUZ_20@@, transparent 60%),
+        radial-gradient(ellipse 50% 45% at 90% 92%, @@ACENTO_LUZ_14@@, transparent 58%),
         radial-gradient(ellipse 40% 40% at 72% 22%,
-                        rgba(122, 162, 247, 0.16), transparent 58%),
+                        rgba(122, 162, 247, 0.13), transparent 58%),
         radial-gradient(ellipse 45% 35% at 28% 78%,
                         rgba(255, 255, 255, 0.05), transparent 58%),
         #0f1216 !important;
@@ -151,14 +151,23 @@ _ESTILOS = """
 .cristal,
 [data-testid="stMetric"],
 [data-testid="stExpander"] > details {
-    background: rgba(255, 255, 255, 0.055) !important;
+    background: rgba(255, 255, 255, 0.07) !important;
     -webkit-backdrop-filter: blur(20px) saturate(160%);
     backdrop-filter: blur(20px) saturate(160%);
-    border: 1px solid rgba(255, 255, 255, 0.12) !important;
+    border: 1px solid rgba(255, 255, 255, 0.13) !important;
     border-radius: 0.7rem;
     box-shadow:
         inset 0 1px 0 rgba(255, 255, 255, 0.10),
         0 12px 40px rgba(0, 0, 0, 0.32);
+}
+
+/* Un panel dentro de otro no vuelve a sumar fondo: quedaría cada vez
+   más blanco hacia adentro. El interior sólo conserva el borde. */
+.cristal .cristal {
+    background: rgba(255, 255, 255, 0.025) !important;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 [data-testid="stSidebar"] > div:first-child {
@@ -393,8 +402,8 @@ header[data-testid="stHeader"] {
     }
     .stTabs [data-baseweb="tab"] { white-space: nowrap; }
     [data-testid="stSegmentedControl"] { overflow-x: auto; }
-    [data-testid="stVerticalBlockBorderWrapper"] > div {
-        padding: 0.75rem;
+    .cristal {
+        padding: 0.75rem !important;
     }
     /* El desenfoque es caro en el teléfono: menos radio, mismo efecto. */
     .cristal, [data-testid="stMetric"], [data-testid="stExpander"] > details,
@@ -441,12 +450,13 @@ _VIEWPORT = """
         }
 
         // `st.container(border=True)` y el contenedor sin borde son el
-        // mismo elemento en el HTML; sólo los distingue el estilo. Se
-        // marcan como cristal los que tienen borde, y se vuelve a mirar
-        // en cada cambio porque Streamlit reconstruye el árbol al rerun.
+        // mismo elemento en el HTML —un stVerticalBlock; el borde va en
+        // ese mismo div—, así que sólo los distingue el estilo calculado.
+        // Se marcan como cristal los que tienen borde, y se vuelve a
+        // mirar en cada cambio porque Streamlit reconstruye el árbol.
         function marcar() {
             var nodos = doc.querySelectorAll(
-                '[data-testid="stVerticalBlockBorderWrapper"]:not(.cristal)'
+                '[data-testid="stVerticalBlock"]:not(.cristal)'
             );
             for (var i = 0; i < nodos.length; i++) {
                 var estilo = doc.defaultView.getComputedStyle(nodos[i]);
