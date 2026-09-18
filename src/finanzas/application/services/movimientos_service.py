@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, time
+from datetime import date, time, timedelta
 
 import pandas as pd
 
@@ -150,6 +150,7 @@ class MovimientosService:
         referencia_externa: str = "",
         lugar: str = "",
         hora: time | None = None,
+        fecha_banco: date | None = None,
     ) -> int:
         """
         Registra un movimiento nuevo.
@@ -175,6 +176,12 @@ class MovimientosService:
         if isinstance(fecha_pago, _SinEspecificar):
             fecha_pago = fecha
 
+        # Lo capturado a mano no trae fecha del banco. Se asume que el banco
+        # lo aplica al día siguiente: así, cuando llegue el estado de cuenta,
+        # la deduplicación lo reconoce a la primera y no como «posible».
+        if fecha_banco is None and not descripcion_banco and not referencia_externa:
+            fecha_banco = fecha + timedelta(days=1)
+
         movimiento = _construir(
             fecha=fecha,
             tipo=tipo,
@@ -198,6 +205,7 @@ class MovimientosService:
             referencia_externa=referencia_externa,
             lugar=lugar,
             hora=hora,
+            fecha_banco=fecha_banco,
         )
 
         movimiento_id = self._repo.crear(movimiento)
@@ -254,6 +262,7 @@ class MovimientosService:
             "referencia_externa": actual["referencia_externa"],
             "lugar": actual["lugar"],
             "hora": _hora_o_nulo(actual["hora"]),
+            "fecha_banco": _fecha_o_nulo(actual["fecha_banco"]),
         }
         datos.update(campos)
 
@@ -356,6 +365,7 @@ def _construir(**datos: object) -> Movimiento:
         referencia_externa=str(datos.get("referencia_externa") or ""),
         lugar=str(datos.get("lugar") or ""),
         hora=_hora_o_nulo(datos.get("hora")),
+        fecha_banco=_fecha_o_nulo(datos.get("fecha_banco")),
     )
     _validar(movimiento)
 

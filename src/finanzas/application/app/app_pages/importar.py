@@ -303,7 +303,7 @@ def _sesion_compatible() -> bool:
     return all(
         hasattr(c, campo)
         for c in muestra
-        for campo in ("lugar", "hora", "productos", "guardados", "tipo_elegido")
+        for campo in ("lugar", "hora", "productos", "guardados", "fecha")
     )
 
 
@@ -539,19 +539,19 @@ if st.session_state.get("paso") == "completar":
         fila_1 = st.columns([1, 1, 2, 1])
 
         with fila_1[0]:
-            # Fecha y monto no se editan: son lo que el banco va a repetir
-            # en el siguiente estado de cuenta, y con lo que se reconoce un
-            # movimiento ya importado.
-            st.date_input(
+            # La fecha sí se corrige: el banco pone la de aplicación y a
+            # veces se quiere la de compra. La del banco se guarda aparte,
+            # así que corregirla no rompe el reconocimiento al reimportar.
+            candidato.fecha = st.date_input(
                 "Fecha",
-                value=origen.fecha,
+                value=candidato.fecha_final,
                 format="DD/MM/YYYY",
-                disabled=True,
                 help=(
-                    "Viene del estado de cuenta y no se cambia: es con la que "
-                    "se reconoce el movimiento si vuelves a importar."
+                    f"El banco la reporta el {origen.fecha:%d/%m/%Y}. Puedes "
+                    "poner la de compra; la del banco se conserva aparte."
                 ),
                 key=f"fecha_{indice}",
+                persist_state="session",
             )
 
         with fila_1[1]:
@@ -584,8 +584,7 @@ if st.session_state.get("paso") == "completar":
             candidato.tipo_elegido = tipo or candidato.tipo_sugerido
 
         with fila_1[3]:
-            # Tampoco se edita: junto con la fecha, es lo que identifica
-            # el movimiento frente al documento.
+            # El monto no se edita: es lo que se cobró.
             st.number_input(
                 "Monto",
                 value=float(origen.monto),

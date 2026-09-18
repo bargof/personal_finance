@@ -128,17 +128,30 @@ def test_la_fecha_arranca_con_la_del_banco(base_ui):
     assert _control(prueba, "date_input", "Fecha").value == date(2026, 7, 27)
 
 
-def test_fecha_y_monto_no_se_pueden_editar(base_ui):
+def test_el_monto_no_se_puede_editar_pero_la_fecha_si(base_ui):
     """
-    Las dos casillas bloqueadas del asistente.
+    El monto es lo que se cobró; la fecha, la que uno decide.
 
-    Son con lo que se reconoce el movimiento al reimportar: corregidas
-    dejarían de coincidir con lo que el banco va a repetir.
+    El banco pone la de aplicación y a veces se quiere la de compra. La
+    del banco se guarda aparte, así que corregirla no rompe el
+    reconocimiento al reimportar.
     """
     prueba = _asistente(base_ui)
 
-    assert _control(prueba, "date_input", "Fecha").disabled
     assert _control(prueba, "number_input", "Monto").disabled
+    assert not _control(prueba, "date_input", "Fecha").disabled
+
+
+def test_corregir_la_fecha_guarda_la_corregida_y_conserva_la_del_banco(base_ui):
+    """Las dos fechas llegan a la base, cada una en su columna."""
+    prueba = _asistente(base_ui)
+
+    _control(prueba, "date_input", "Fecha").set_value(date(2026, 7, 25)).run()
+    _control(prueba, "button", "Siguiente").click().run()
+
+    guardado = MovimientosService().buscar().iloc[0]
+    assert guardado["fecha"].date() == date(2026, 7, 25)
+    assert guardado["fecha_banco"].date() == date(2026, 7, 27)
 
 
 def test_avanzar_guarda_con_fecha_y_monto_del_banco(base_ui):

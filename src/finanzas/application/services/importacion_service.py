@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 #: compra, así que exigir coincidencia exacta dejaría pasar duplicados.
 TOLERANCIA_DIAS = 3
 
+#: Cuánto se abre el rango de fechas al buscar lo ya registrado. Es más
+#: ancho que la tolerancia porque filtra por la fecha editable, que puede
+#: estar corrida respecto a la del banco.
+MARGEN_RANGO_DIAS = 45
+
 NUEVO = "Nuevo"
 DUPLICADO = "Ya registrado"
 POSIBLE = "Posible duplicado"
@@ -89,12 +94,14 @@ class Candidato:
     #: solo gasto con una categoría, y esto es su detalle.
     productos: list[Producto] = field(default_factory=list)
 
-    #: De lo que trae el documento, sólo el tipo se corrige: el banco no
-    #: distingue una devolución de un pago de tarjeta. Fecha y monto no
-    #: están aquí a propósito: son con lo que se reconoce el movimiento al
-    #: reimportar, y corregidos dejarían de coincidir con lo que el banco
-    #: va a repetir.
+    #: De lo que trae el documento se corrigen el tipo —el banco no
+    #: distingue una devolución de un pago de tarjeta— y la fecha —el
+    #: banco pone la de aplicación y a veces se quiere la de compra—. El
+    #: monto no: es lo que se cobró. La fecha original queda en `origen` y
+    #: se guarda aparte como `fecha_banco`, que es con la que se reconoce
+    #: el movimiento al reimportar.
     tipo_elegido: str = ""
+    fecha: date | None = None
     fecha_pago: date | None = None
 
     #: Campos que el documento no trae y el movimiento sí admite.
@@ -142,6 +149,11 @@ class Candidato:
     def tipo(self) -> str:
         """El tipo elegido por el usuario, o el sugerido si no lo cambió."""
         return self.tipo_elegido or self.tipo_sugerido
+
+    @property
+    def fecha_final(self) -> date:
+        """La fecha corregida por el usuario, o la del documento."""
+        return self.fecha or self.origen.fecha
 
     @property
     def desglosado(self) -> float:
@@ -307,7 +319,10 @@ class ImportacionService:
         else:
             desde, hasta = lectura.periodo_inicio, lectura.periodo_fin
 
-        margen = timedelta(days=TOLERANCIA_DIAS)
+        # El rango filtra por `fecha`, que el usuario puede haber corrido
+        # respecto a la del banco; se abre lo suficiente para que una
+        # corrección razonable no lo saque del rango.
+        margen = timedelta(days=MARGEN_RANGO_DIAS)
         return self._repo.listar(desde=desde - margen, hasta=hasta + margen)
 
     def _buscar(
@@ -332,7 +347,12 @@ class ImportacionService:
             if indice in usados:
                 continue
 
-            distancia = abs((fila["fecha"].date() - fecha).days)
+            # Se compara contra lo que el banco dijo la vez anterior, no
+            # contra la fecha corregida: es lo que va a repetir.
+            registrada = fila.get("fecha_banco")
+            if registrada is None or pd.isna(registrada):
+                registrada = fila["fecha"]
+            distancia = abs((registrada.date() - fecha).days)
             if exacto and distancia == 0:
                 return int(indice)
             if not exacto and distancia <= TOLERANCIA_DIAS:
@@ -487,7 +507,7 @@ class ImportacionService:
         servicio = MovimientosService(self._repo)
 
         movimiento_id = servicio.registrar(
-            fecha=candidato.origen.fecha,
+            fecha=candidato.fecha_final,
             tipo=candidato.tipo,
             monto=candidato.origen.monto,
             categoria_id=candidato.categoria_id,
@@ -512,6 +532,9 @@ class ImportacionService:
             referencia_externa=candidato.origen.referencia,
             lugar=candidato.lugar,
             hora=time.fromisoformat(candidato.hora) if candidato.hora else None,
+            # La del banco, aparte: es la que va a repetir el siguiente
+            # estado de cuenta, y con la que se reconoce al reimportar.
+            fecha_banco=candidato.origen.fecha,
         )
 
         # Los productos son detalle del movimiento, no movimientos: cuelgan
@@ -541,7 +564,7 @@ class ImportacionService:
         return (
             candidato.fecha_pago
             or candidato.origen.fecha_cargo
-            or candidato.origen.fecha
+            or candidato.fecha_final
         )
 
 
@@ -605,6 +628,7 @@ def serializar(resultado: ResultadoImportacion) -> str:
                     "revisado": c.revisado,
                     "guardados": c.guardados,
                     "tipo_elegido": c.tipo_elegido,
+                    "fecha": _a_json(c.fecha),
                     "fecha_pago": _a_json(c.fecha_pago),
                     "lugar": c.lugar,
                     "hora": c.hora,
@@ -674,6 +698,7 @@ def deserializar(crudo: str) -> ResultadoImportacion:
                 revisado=crudo_candidato["revisado"],
                 guardados=list(crudo_candidato["guardados"]),
                 tipo_elegido=crudo_candidato.get("tipo_elegido", ""),
+                fecha=_fecha_de(crudo_candidato.get("fecha")),
                 fecha_pago=_fecha_de(crudo_candidato.get("fecha_pago")),
                 lugar=crudo_candidato.get("lugar", ""),
                 hora=crudo_candidato.get("hora", ""),

@@ -111,6 +111,10 @@ class Movimiento:
     #: Folio del banco, donde el documento lo trae.
     referencia_externa: str = ""
 
+    #: Fecha tal como la reportó el banco, si vino de un estado de cuenta.
+    #: `fecha` se edita; ésta es con la que se reconoce al reimportar.
+    fecha_banco: date | None = None
+
     #: Dónde ocurrió. Texto libre: un comercio no es un catálogo.
     lugar: str = ""
 

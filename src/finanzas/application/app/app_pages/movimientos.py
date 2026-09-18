@@ -236,11 +236,24 @@ with registrar:
 
             nota = st.text_area("Nota o comprobante", height=80)
 
-            banderas = st.columns(2)
+            banderas = st.columns([1, 1, 1])
             with banderas[0]:
                 recurrente = st.checkbox("Es un gasto recurrente")
             with banderas[1]:
                 planeado = st.checkbox("Estaba planeado", value=True)
+            with banderas[2]:
+                # El banco suele aplicar al día siguiente. Con esto, al
+                # importar el estado de cuenta se reconoce a la primera.
+                fecha_banco = st.date_input(
+                    "Fecha en el banco",
+                    value=fecha + timedelta(days=1),
+                    format="DD/MM/YYYY",
+                    help=(
+                        "Cuándo lo va a reportar el banco. Por defecto, un día "
+                        "después: es con lo que se reconoce al importar el "
+                        "estado de cuenta."
+                    ),
+                )
 
         # Fuera del expander de detalle: decidir si ya se pagó es parte de
         # la captura normal, no un ajuste fino.
@@ -373,6 +386,7 @@ with registrar:
                     fecha_pago=fecha_pago,
                     lugar=lugar,
                     hora=hora,
+                    fecha_banco=fecha_banco,
                 )
             except ValueError as error:
                 reportar_error(error)
@@ -704,6 +718,17 @@ with explorar:
                 pie += f" · folio `{actual['referencia_externa']}`"
             st.caption(pie)
 
+        fecha_banco_actual = actual["fecha_banco"]
+        nueva_fecha_banco = st.date_input(
+            "Fecha en el banco",
+            value=fecha_banco_actual.date()
+            if pd.notna(fecha_banco_actual)
+            else nueva_fecha + timedelta(days=1),
+            format="DD/MM/YYYY",
+            help="Con la que se reconoce al importar el estado de cuenta.",
+            key=f"edit_fbanco_{movimiento_id}",
+        )
+
         previos_edicion = servicios.movimientos.nombres_de_proyecto()
         opciones_proyecto = ["— ninguno —", *previos_edicion]
         nuevo_proyecto = st.selectbox(
@@ -760,6 +785,7 @@ with explorar:
                         proyecto=nuevo_proyecto,
                         lugar=nuevo_lugar,
                         hora=nueva_hora,
+                        fecha_banco=nueva_fecha_banco,
                     )
                 except ValueError as error:
                     reportar_error(error)

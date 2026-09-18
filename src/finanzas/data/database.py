@@ -100,6 +100,11 @@ CREATE TABLE IF NOT EXISTS movimientos (
     -- Folio del banco. Donde existe, dos movimientos con el mismo folio
     -- son el mismo movimiento, sin depender de fecha ni monto.
     referencia_externa TEXT NOT NULL DEFAULT '',
+    -- Fecha tal como la reportó el banco. `fecha` es la que uno decide
+    -- —la de compra, no la de aplicación— y se edita; ésta es la que el
+    -- banco va a repetir en el siguiente estado de cuenta, y con la que
+    -- se reconoce un movimiento ya importado.
+    fecha_banco     TEXT,
     -- Dónde y a qué hora. El lugar es texto libre porque un comercio no
     -- es un catálogo; la hora es opcional porque ningún estado de cuenta
     -- la trae y capturarla a mano es un extra, no una obligación.
@@ -346,6 +351,7 @@ SELECT
     m.hora,
     m.descripcion_banco,
     m.referencia_externa,
+    m.fecha_banco,
     m.necesidad,
     m.naturaleza,
     m.recurrente,
@@ -707,6 +713,7 @@ _COLUMNAS_NUEVAS: tuple[tuple[str, str, str], ...] = (
     ("movimientos", "referencia_externa", "TEXT NOT NULL DEFAULT ''"),
     ("movimientos", "lugar", "TEXT NOT NULL DEFAULT ''"),
     ("movimientos", "hora", "TEXT"),
+    ("movimientos", "fecha_banco", "TEXT"),
 )
 
 #: Relleno que corre una sola vez, justo tras añadir una columna.

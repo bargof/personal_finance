@@ -325,9 +325,15 @@ def test_sin_nada_registrado_todo_es_nuevo(importacion):
 def test_un_movimiento_ya_capturado_se_marca_y_se_desmarca(
     importacion, servicio, ids_catalogo
 ):
-    """Lo que ya está no se vuelve a importar, pero se dice por qué."""
+    """
+    Lo que ya está no se vuelve a importar, pero se dice por qué.
+
+    Se capturó a mano el día de la compra; el banco lo reporta al día
+    siguiente, que es lo que la captura manual asume por defecto. Por
+    eso coincide exacto y no como «posible».
+    """
     servicio.registrar(
-        fecha=date(2026, 7, 23),
+        fecha=date(2026, 7, 22),
         tipo=TipoMovimiento.GASTO,
         monto=37.00,
         categoria_id=ids_catalogo["vivienda"],
@@ -340,6 +346,35 @@ def test_un_movimiento_ya_capturado_se_marca_y_se_desmarca(
     assert repetido.estado == DUPLICADO
     assert not repetido.incluir
     assert "23/07/2026" in repetido.motivo
+
+
+def test_la_captura_manual_asume_que_el_banco_aplica_al_dia_siguiente(
+    servicio, ids_catalogo
+):
+    """La fecha del banco por defecto es la de captura más un día."""
+    servicio.registrar(
+        fecha=date(2026, 7, 22),
+        tipo=TipoMovimiento.GASTO,
+        monto=37.00,
+        categoria_id=ids_catalogo["vivienda"],
+        cuenta_id=ids_catalogo["cuenta"],
+    )
+
+    assert servicio.buscar().iloc[0]["fecha_banco"].date() == date(2026, 7, 23)
+
+
+def test_la_fecha_del_banco_se_puede_dar_a_mano(servicio, ids_catalogo):
+    """Si se sabe cuándo la reportó el banco, eso manda sobre el +1."""
+    servicio.registrar(
+        fecha=date(2026, 7, 22),
+        tipo=TipoMovimiento.GASTO,
+        monto=37.00,
+        categoria_id=ids_catalogo["vivienda"],
+        cuenta_id=ids_catalogo["cuenta"],
+        fecha_banco=date(2026, 7, 25),
+    )
+
+    assert servicio.buscar().iloc[0]["fecha_banco"].date() == date(2026, 7, 25)
 
 
 def test_una_fecha_corrida_se_marca_como_posible_duplicado(
@@ -374,7 +409,7 @@ def test_dos_movimientos_iguales_no_se_colapsan(importacion, servicio, ids_catal
     deduplicación cuenta ocurrencias en vez de agrupar por clave.
     """
     servicio.registrar(
-        fecha=date(2026, 7, 23),
+        fecha=date(2026, 7, 22),
         tipo=TipoMovimiento.GASTO,
         monto=37.00,
         categoria_id=ids_catalogo["vivienda"],
@@ -926,27 +961,32 @@ def test_el_usuario_puede_cambiar_el_tipo_sugerido(importacion, servicio, ids_ca
     assert servicio.buscar().iloc[0]["tipo"] == str(TipoMovimiento.GASTO)
 
 
-def test_fecha_y_monto_siempre_son_los_del_banco(importacion, servicio, ids_catalogo):
+def test_corregir_la_fecha_no_rompe_el_reconocimiento_al_reimportar(
+    importacion, servicio, ids_catalogo
+):
     """
-    A diferencia del tipo, ni la fecha ni el monto se corrigen.
+    La razón de guardar la fecha del banco aparte.
 
-    Son con lo que se reconoce el movimiento al reimportar, y corregidos
-    dejarían de coincidir con lo que el banco va a repetir.
+    Si sólo se guardara la corregida, reimportar el mismo documento no
+    encontraría el movimiento y lo propondría otra vez.
     """
     from datetime import date as fecha_tipo
 
     resultado = importacion.leer_documento(MP_TARJETA.encode())
-    candidato = resultado.candidatos[0]
+    candidato = next(c for c in resultado.candidatos if c.origen.monto == 24.00)
     candidato.categoria_id = ids_catalogo["vivienda"]
     candidato.cuenta_id = ids_catalogo["cuenta"]
-
+    candidato.fecha = fecha_tipo(2026, 7, 10)  # muy lejos de la del banco
     importacion.guardar_uno(candidato, ids_catalogo["cuenta"])
 
     guardado = servicio.buscar().iloc[0]
-    assert guardado["fecha"].date() == fecha_tipo(2026, 7, 22)
-    assert guardado["monto"] == 24.00
-    assert not hasattr(candidato, "fecha")
-    assert not hasattr(candidato, "monto")
+    assert guardado["fecha"].date() == fecha_tipo(2026, 7, 10)
+    assert guardado["fecha_banco"].date() == fecha_tipo(2026, 7, 22)
+
+    segunda = importacion.leer_documento(MP_TARJETA.encode())
+    repetido = next(c for c in segunda.candidatos if c.origen.monto == 24.00)
+
+    assert repetido.estado == DUPLICADO
 
 
 def test_sin_corregir_nada_se_guarda_lo_que_dijo_el_banco(
@@ -959,12 +999,14 @@ def test_sin_corregir_nada_se_guarda_lo_que_dijo_el_banco(
     candidato.cuenta_id = ids_catalogo["cuenta"]
 
     assert candidato.tipo == candidato.tipo_sugerido
+    assert candidato.fecha_final == candidato.origen.fecha
 
     importacion.guardar_uno(candidato, ids_catalogo["cuenta"])
     guardado = servicio.buscar().iloc[0]
 
     assert guardado["monto"] == candidato.origen.monto
     assert guardado["fecha"].date() == candidato.origen.fecha
+    assert guardado["fecha_banco"].date() == candidato.origen.fecha
 
 
 def test_la_fecha_de_pago_explicita_manda_sobre_la_del_cargo(

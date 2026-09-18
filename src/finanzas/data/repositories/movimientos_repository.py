@@ -38,6 +38,7 @@ _CAMPOS_ESCRITURA = (
     "referencia_externa",
     "lugar",
     "hora",
+    "fecha_banco",
 )
 
 
@@ -402,6 +403,7 @@ def _a_valores(movimiento: Movimiento) -> list[object]:
         movimiento.referencia_externa.strip(),
         movimiento.lugar.strip(),
         movimiento.hora.strftime("%H:%M") if movimiento.hora else None,
+        movimiento.fecha_banco.isoformat() if movimiento.fecha_banco else None,
     ]
 
 
@@ -412,8 +414,9 @@ def _tipar(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.copy()
     df["fecha"] = pd.to_datetime(df["fecha"])
-    if "fecha_pago" in df.columns:
-        df["fecha_pago"] = pd.to_datetime(df["fecha_pago"], errors="coerce")
+    for columna in ("fecha_pago", "fecha_banco"):
+        if columna in df.columns:
+            df[columna] = pd.to_datetime(df[columna], errors="coerce")
     for bandera in ("recurrente", "planeado", "pagado"):
         if bandera in df.columns:
             df[bandera] = df[bandera].astype(bool)
