@@ -95,6 +95,52 @@ class PresupuestoService:
             ]
         )
 
+    def tablero_historico(
+        self,
+        periodo_referencia: str,
+        movimientos: pd.DataFrame,
+        meses: int,
+        umbral_alerta: float = 0.9,
+    ) -> pd.DataFrame:
+        """
+        El presupuesto de un mes frente al gasto mensual promedio.
+
+        El presupuesto es mensual por naturaleza; en el histórico lo que
+        se compara contra él no es el gasto de un mes sino el promedio de
+        todos los meses con datos. Las líneas salen del periodo de
+        referencia (el mes en curso), y `gasto_del_mes` pasa a ser ese
+        promedio.
+        """
+        lineas = self.lineas(periodo_referencia)
+        if not lineas:
+            return self.tablero(periodo_referencia, umbral_alerta)
+
+        promedio: dict[str, float] = {}
+        if not movimientos.empty:
+            por_categoria = movimientos.groupby("categoria")["gasto_real"].sum()
+            promedio = (por_categoria / max(meses, 1)).to_dict()
+
+        for linea in lineas:
+            linea.gasto_del_mes = float(promedio.get(linea.categoria, 0.0))
+
+        return pd.DataFrame(
+            [
+                {
+                    "categoria_id": linea.categoria_id,
+                    "categoria": linea.categoria,
+                    "monto_manual": linea.monto_manual,
+                    "pct_recorte": linea.pct_recorte,
+                    "promedio_3m": linea.promedio_3m,
+                    "presupuesto_activo": linea.presupuesto_activo,
+                    "gasto_del_mes": linea.gasto_del_mes,
+                    "disponible": linea.disponible,
+                    "pct_usado": linea.pct_usado,
+                    "estado": str(linea.estado(umbral_alerta)),
+                }
+                for linea in lineas
+            ]
+        )
+
     def presupuesto_total(self, periodo: str) -> float:
         """Suma del presupuesto activo de todas las categorías del periodo."""
         return sum(linea.presupuesto_activo for linea in self.lineas(periodo))

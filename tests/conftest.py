@@ -44,6 +44,8 @@ def ids_catalogo(catalogos: CatalogosRepository) -> dict[str, int]:
         "ahorro": catalogos.mapa_nombre_id("categorias")["Ahorro programado"],
         "cuenta": catalogos.mapa_nombre_id("cuentas")["Cuenta principal"],
         "efectivo": catalogos.mapa_nombre_id("cuentas")["Efectivo"],
+        "tarjeta": catalogos.mapa_nombre_id("cuentas")["Tarjeta crédito"],
+        "ahorro_cuenta": catalogos.mapa_nombre_id("cuentas")["Cuenta ahorro"],
     }
 
 

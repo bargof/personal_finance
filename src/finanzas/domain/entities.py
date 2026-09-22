@@ -13,7 +13,9 @@ from finanzas.domain.enums import (
     Liquidez,
     Naturaleza,
     Necesidad,
+    OrigenSaldo,
     Prioridad,
+    TipoCuenta,
     TipoMovimiento,
     TipoPatrimonio,
 )
@@ -50,13 +52,44 @@ class Subcategoria:
 
 @dataclass(slots=True)
 class Cuenta:
-    """Cuenta o instrumento por el que entra y sale el dinero."""
+    """
+    Cuenta o instrumento por el que entra y sale el dinero.
+
+    Cada cuenta es un libro: todo movimiento confirmado y pagado la mueve,
+    y su saldo a cualquier fecha se deduce de esos movimientos a partir
+    de un saldo verificado. El tipo decide de qué lado del balance cae y
+    qué significa mover dinero hacia ella o desde ella.
+    """
 
     nombre: str
     id: int | None = None
-    tipo: str = "Banco"
+    tipo: TipoCuenta = TipoCuenta.DEBITO
     institucion: str = ""
     activa: bool = True
+
+    @property
+    def lado(self) -> TipoPatrimonio:
+        """Lado del balance en el que entra la cuenta."""
+        return self.tipo.lado
+
+    @property
+    def es_pasivo(self) -> bool:
+        """Indica si su saldo es deuda: tarjeta de crédito o préstamo."""
+        return self.tipo.es_pasivo
+
+    def saldo_visto(self, saldo_libro: float) -> float:
+        """
+        Traduce el saldo del libro al número que enseña el banco.
+
+        En el libro una deuda es negativa; el banco la reporta en positivo
+        como «lo que debes». Aquí se hace la conversión para que el usuario
+        capture y lea siempre como en su estado de cuenta.
+        """
+        return -saldo_libro if self.es_pasivo else saldo_libro
+
+    def saldo_libro(self, saldo_visto: float) -> float:
+        """Inversa de `saldo_visto`: del número del banco al signo del libro."""
+        return -saldo_visto if self.es_pasivo else saldo_visto
 
 
 @dataclass(slots=True)
@@ -115,7 +148,12 @@ class Movimiento:
     #: `fecha` se edita; ésta es con la que se reconoce al reimportar.
     fecha_banco: date | None = None
 
-    #: Dónde ocurrió. Texto libre: un comercio no es un catálogo.
+    #: Quién cobró: el comercio o la marca (Walmart, DiDi, Oxxo). Texto
+    #: libre: un comercio no es un catálogo.
+    empresa: str = ""
+
+    #: Dónde ocurrió: la plaza, la colonia, la ciudad. Aparte de la
+    #: empresa porque la misma empresa cobra en muchos sitios.
     lugar: str = ""
 
     #: A qué hora, si se sabe. Ningún estado de cuenta la trae.
@@ -134,14 +172,12 @@ class Movimiento:
         Monto devengado que sigue sin pagarse.
 
         Es un adeudo generado: el gasto ya ocurrió, así que pesa en el
-        presupuesto, pero el dinero no ha salido.
+        presupuesto, pero el dinero no ha salido de ninguna cuenta. Sólo
+        un gasto puede quedar así; un ingreso, un ahorro o un traspaso
+        ocurren o no ocurren.
         """
-        construye = self.tipo in (
-            TipoMovimiento.GASTO,
-            TipoMovimiento.AHORRO,
-            TipoMovimiento.INVERSION,
-        )
-        if construye and self._confirmado and not self.pagado:
+        es_gasto = self.tipo == TipoMovimiento.GASTO
+        if es_gasto and self._confirmado and not self.pagado:
             return self.monto
         return 0.0
 
@@ -167,12 +203,24 @@ class Movimiento:
         return bool(self.descripcion_banco or self.referencia_externa)
 
     @property
+    def mueve_entre_cuentas(self) -> bool:
+        """
+        Indica si el dinero sale de una cuenta propia y entra en otra.
+
+        Lo hace un traspaso, y también un ahorro o una inversión: el dinero
+        no se va, cambia de cuenta. Lo que los distingue es la intención,
+        no la mecánica.
+        """
+        return self.tipo in (
+            TipoMovimiento.TRANSFERENCIA,
+            TipoMovimiento.AHORRO,
+            TipoMovimiento.INVERSION,
+        )
+
+    @property
     def es_traspaso(self) -> bool:
         """Indica si el movimiento mueve dinero entre dos cuentas propias."""
-        return (
-            self.tipo == TipoMovimiento.TRANSFERENCIA
-            and self.cuenta_destino_id is not None
-        )
+        return self.mueve_entre_cuentas and self.cuenta_destino_id is not None
 
     def flujo_de(self, cuenta_id: int) -> float:
         """
@@ -180,9 +228,9 @@ class Movimiento:
 
         `impacto_caja` mira la caja completa, donde una transferencia vale
         cero. Vista cuenta por cuenta no es neutra: sale de una y entra en
-        otra.
+        otra. Sólo lo confirmado y pagado mueve un libro.
         """
-        if not self.pagado:
+        if not self.pagado or not self._confirmado:
             return 0.0
         if self.es_traspaso and cuenta_id == self.cuenta_destino_id:
             return self.monto
@@ -348,11 +396,12 @@ class Meta:
 @dataclass(slots=True)
 class PosicionPatrimonial:
     """
-    Una línea del balance personal: un activo o un pasivo.
+    Una línea del balance que no es una cuenta: la casa, el auto, un
+    préstamo entre personas.
 
-    Cuando la posición es una cuenta del catálogo, `cuenta_id` la liga:
-    el saldo vive aquí y la identidad allá, sin capturar el nombre dos
-    veces. Queda nulo en lo que no es cuenta (la casa, el auto).
+    Las cuentas del catálogo no van aquí: su saldo se deduce de los
+    movimientos y de sus saldos verificados. `cuenta_id` sobrevive sólo
+    para reconocer posiciones capturadas antes de ese cambio.
     """
 
     nombre: str
@@ -379,6 +428,26 @@ class PosicionPatrimonial:
     def es_cuenta(self) -> bool:
         """Indica si la posición refleja el saldo de una cuenta del catálogo."""
         return self.cuenta_id is not None
+
+
+@dataclass(slots=True)
+class SaldoVerificado:
+    """
+    Un saldo real de una cuenta al cierre de un día.
+
+    Es lo único del balance que se captura: lo que dice el estado de
+    cuenta al inicio y al fin de su periodo, o lo que enseña la app del
+    banco hoy. Todo lo demás se deduce de los movimientos.
+
+    `saldo` va con el signo del libro: en una tarjeta, deber es negativo.
+    """
+
+    cuenta_id: int
+    fecha: date
+    saldo: float
+    id: int | None = None
+    origen: OrigenSaldo = OrigenSaldo.MANUAL
+    nota: str = ""
 
 
 @dataclass(slots=True)
@@ -506,7 +575,12 @@ class Proyecto:
 
 @dataclass(slots=True)
 class CierreMensual:
-    """Fotografía del balance al cierre de un mes."""
+    """
+    Fotografía del balance al cierre de un mes.
+
+    Ya no se captura: se deduce de los saldos de las cuentas al último día
+    del periodo, más las posiciones que no son cuenta.
+    """
 
     periodo: str
     id: int | None = None

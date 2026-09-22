@@ -10,7 +10,12 @@ from finanzas.data.lectores.base import (
     MovimientoImportado,
     ResultadoLectura,
     anio_del_periodo,
+    es_apartado,
     es_negativo,
+    es_pago_de_tarjeta,
+    es_rendimiento,
+    es_retiro,
+    es_transferencia_propia,
     parsear_fecha_numerica,
     parsear_monto,
 )
@@ -217,27 +222,27 @@ class LectorMercadoPagoCuenta:
             # En el CSV el signo va en el importe: negativo es salida.
             es_cargo=crudo.lstrip().startswith("-"),
             referencia=(fila.get("REFERENCE_ID", "") or "").strip(),
-            es_pago_tarjeta=self._es_traspaso(concepto),
+            es_pago_tarjeta=es_pago_de_tarjeta(concepto),
+            es_retiro_efectivo=es_retiro(concepto),
+            es_apartado=es_apartado(concepto),
+            es_traspaso_propio=es_transferencia_propia(concepto, self.nombres),
+            es_rendimiento=es_rendimiento(concepto),
             linea=";".join(str(valor) for valor in fila.values()),
             pagina=numero,
         )
 
-    def _es_traspaso(self, concepto: str) -> bool:
+    @property
+    def nombres(self) -> tuple[str, ...]:
         """
-        Indica si el movimiento sólo mueve dinero entre cuentas propias.
+        Cómo aparece el titular en «Transferencia enviada/recibida …».
 
-        Apartar o retirar del ahorro y transferirse a uno mismo no es
-        gasto ni ingreso: es un traspaso, y contarlo como gasto inflaría
-        el consumo del mes.
+        Una transferencia con este nombre en el otro extremo es a o desde
+        otra cuenta propia: traspaso, no gasto ni ingreso. Viene de la
+        configuración (`TITULAR`) para no atar el lector a una persona.
         """
-        limpio = concepto.lower()
-        marcas = (
-            "monto apartado",
-            "monto retirado",
-            "transferencia enviada fernando",
-            "transferencia recibida fernando",
-        )
-        return any(marca in limpio for marca in marcas)
+        from finanzas.config.settings import settings
+
+        return (settings.titular,)
 
     def _saldos(self, lineas: list[str], resultado: ResultadoLectura) -> None:
         """

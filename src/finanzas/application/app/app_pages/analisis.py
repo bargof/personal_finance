@@ -3,7 +3,6 @@ from __future__ import annotations
 import streamlit as st
 
 from finanzas.application.app.components import (
-    cargar_tablero,
     grafico_barras,
     grafico_calendario,
     moneda,
@@ -12,7 +11,7 @@ from finanzas.application.app.components import (
     selector_periodo,
     sin_datos,
     tabla_equivalente,
-    version_datos,
+    tablero_del_periodo,
 )
 
 # ═══════════════════════════════════════════════════════════
@@ -21,10 +20,14 @@ from finanzas.application.app.components import (
 
 servicios = obtener_servicios()
 periodo = selector_periodo()
-tablero = cargar_tablero(periodo, version_datos())
+tablero = tablero_del_periodo(periodo)
 
 st.title("Análisis")
-st.caption(f"{tablero.etiqueta} · desglose del gasto del periodo")
+st.caption(
+    f"Todo lo registrado · {tablero.meses} meses con datos · desglose del gasto"
+    if tablero.es_historico
+    else f"{tablero.etiqueta} · desglose del gasto del periodo"
+)
 
 if not tablero.hay_datos:
     sin_datos()
@@ -296,7 +299,11 @@ with calendario_tab:
         )
 
     with st.container(border=True):
-        st.subheader("Gasto por día del mes")
+        st.subheader(
+            "Gasto promedio por día del mes"
+            if tablero.es_historico
+            else "Gasto por día del mes"
+        )
         st.altair_chart(grafico_calendario(calendario))
         tabla_equivalente(
             calendario[["dia", "gasto", "sin_gasto"]].rename(

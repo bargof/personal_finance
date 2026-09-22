@@ -80,6 +80,30 @@ class MovimientoImportado:
     #: gasto contaría dos veces lo que ya se contó al comprar.
     es_pago_tarjeta: bool = False
 
+    #: Un retiro en cajero tampoco es gasto: el dinero sigue siendo de uno,
+    #: ahora en efectivo. Se gasta después, cuando se gasta.
+    es_retiro_efectivo: bool = False
+
+    #: Dinero que va o viene del apartado del mismo banco.
+    es_apartado: bool = False
+
+    #: Transferencia a o desde otra cuenta propia, en otro banco: se
+    #: reconoce porque el banco pone el nombre de uno mismo. Vista desde
+    #: la cuenta que recibe es un abono, pero no es ingreso: el dinero ya
+    #: era de uno. Cuando se importe el estado de la cuenta emisora, la
+    #: misma transferencia aparecerá como cargo y se reconocerá como la
+    #: otra pata.
+    es_traspaso_propio: bool = False
+
+    #: Ganancias de intereses o rendimientos. Son muchas líneas de centavos
+    #: al mes, y registrarlas una por una no dice nada: se juntan en un
+    #: total por mes antes de proponerlas.
+    es_rendimiento: bool = False
+
+    #: Cuántas líneas del documento junta este movimiento. Cero en una
+    #: línea normal; en un total de ganancias, cuántas ganancias suma.
+    agrupa: int = 0
+
     pagina: int = 0
     linea: str = ""
 
@@ -87,6 +111,32 @@ class MovimientoImportado:
     def fecha_operacion(self) -> date:
         """Fecha en que ocurrió el movimiento."""
         return self.fecha
+
+    @property
+    def es_traspaso(self) -> bool:
+        """Indica si sólo mueve dinero entre cuentas propias."""
+        return (
+            self.es_pago_tarjeta
+            or self.es_retiro_efectivo
+            or self.es_apartado
+            or self.es_traspaso_propio
+        )
+
+    @property
+    def es_total(self) -> bool:
+        """Indica si junta varias líneas del documento en una."""
+        return self.agrupa > 1
+
+    @property
+    def referencias(self) -> list[str]:
+        """
+        Los folios que este movimiento representa.
+
+        Uno en una línea normal; varios en un total, separados por coma.
+        Es lo que la deduplicación usa: cada folio ya visto es una línea
+        ya registrada, esté sola o dentro de un total.
+        """
+        return [r.strip() for r in self.referencia.split(",") if r.strip()]
 
     @property
     def monto_con_signo(self) -> float:
@@ -155,6 +205,110 @@ class ResultadoLectura:
             return round(esperado - self.saldo_final, 2)
 
         return None
+
+
+#: Palabras con las que los bancos describen un retiro en cajero.
+_MARCAS_RETIRO = ("retiro", "cajero", "atm", "disposicion de efectivo", "disposición")
+
+
+def es_retiro(descripcion: str) -> bool:
+    """Indica si el concepto del banco describe un retiro de efectivo."""
+    limpia = descripcion.lower()
+    # «Monto retirado Ahorro» es un retiro del apartado, no de cajero.
+    if "apartado" in limpia or "ahorro" in limpia:
+        return False
+    return any(marca in limpia for marca in _MARCAS_RETIRO)
+
+
+#: Palabras con las que los bancos describen el apartado o cajita.
+_MARCAS_APARTADO = ("monto apartado", "monto retirado", "apartado", "cajita")
+
+
+def es_apartado(descripcion: str) -> bool:
+    """Indica si el concepto mueve dinero con el apartado del mismo banco."""
+    limpia = descripcion.lower()
+    return any(marca in limpia for marca in _MARCAS_APARTADO)
+
+
+#: Palabras con las que los bancos describen un pago a la tarjeta.
+_MARCAS_PAGO_TARJETA = ("pago tarjeta", "pago de tarjeta", "pago a tu tarjeta")
+
+
+def es_pago_de_tarjeta(descripcion: str) -> bool:
+    """Indica si el concepto es el pago de una tarjeta de crédito propia."""
+    limpia = descripcion.lower()
+    return any(marca in limpia for marca in _MARCAS_PAGO_TARJETA)
+
+
+def es_transferencia_propia(descripcion: str, nombres: tuple[str, ...]) -> bool:
+    """
+    Indica si es una transferencia a o desde uno mismo.
+
+    El banco pone el nombre del otro extremo; si es el de uno, el dinero
+    sólo cambió de cuenta. `nombres` son las formas en que aparece.
+    """
+    limpia = descripcion.lower()
+    if "transferencia" not in limpia:
+        return False
+    return any(nombre.lower() in limpia for nombre in nombres if nombre)
+
+
+#: Palabras con las que los bancos describen intereses ganados.
+_MARCAS_RENDIMIENTO = ("ganancia", "rendimiento")
+
+
+def es_rendimiento(descripcion: str) -> bool:
+    """Indica si el concepto del banco describe intereses o rendimientos ganados."""
+    limpia = descripcion.lower()
+    return any(marca in limpia for marca in _MARCAS_RENDIMIENTO)
+
+
+def consolidar_rendimientos(
+    movimientos: list[MovimientoImportado],
+) -> list[MovimientoImportado]:
+    """
+    Junta las ganancias de cada mes en un solo movimiento.
+
+    Mercado Pago abona los intereses todos los días, en centavos: veinte
+    líneas al mes que no dicen nada por separado. Aquí se sustituyen por
+    un total por mes, con la fecha de la última y los folios de todas,
+    para que al reimportar se reconozcan. Lo demás sale intacto y en su
+    orden; los totales van al final.
+    """
+    sueltos: list[MovimientoImportado] = []
+    por_mes: dict[tuple[int, int], list[MovimientoImportado]] = {}
+
+    for movimiento in movimientos:
+        if movimiento.es_rendimiento and not movimiento.es_cargo:
+            clave = (movimiento.fecha.year, movimiento.fecha.month)
+            por_mes.setdefault(clave, []).append(movimiento)
+        else:
+            sueltos.append(movimiento)
+
+    totales: list[MovimientoImportado] = []
+    for clave in sorted(por_mes):
+        grupo = por_mes[clave]
+        if len(grupo) == 1:
+            sueltos.append(grupo[0])
+            continue
+
+        ultimo = max(grupo, key=lambda m: m.fecha)
+        totales.append(
+            MovimientoImportado(
+                fecha=ultimo.fecha,
+                monto=round(sum(m.monto for m in grupo), 2),
+                descripcion_banco=f"Ganancias del mes ({len(grupo)} movimientos)",
+                es_cargo=False,
+                referencia=",".join(r for m in grupo for r in m.referencias),
+                categoria_banco="Rendimientos",
+                es_rendimiento=True,
+                agrupa=len(grupo),
+                pagina=grupo[0].pagina,
+                linea="",
+            )
+        )
+
+    return sueltos + totales
 
 
 @runtime_checkable

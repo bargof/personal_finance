@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
 
 from finanzas.data.database import connect
-from finanzas.domain.entities import CierreMensual, PosicionPatrimonial
+from finanzas.domain.entities import PosicionPatrimonial, SaldoVerificado
+from finanzas.domain.enums import TipoCuenta
+from finanzas.domain.saldos import Ancla, Descuadre, Flujo, Libro, SaldoDeducido
 
 # ═══════════════════════════════════════════════════════════
-# Patrimonio: la foto actual del balance y los cierres
-# mensuales que registran cómo se llegó hasta ahí.
+# Patrimonio: los saldos de las cuentas, deducidos de los
+# movimientos y anclados en saldos verificados, más las
+# posiciones que no son cuenta (la casa, el auto).
 # ═══════════════════════════════════════════════════════════
 
 _CAMPOS_POSICION = (
@@ -24,30 +29,271 @@ _CAMPOS_POSICION = (
     "notas",
 )
 
-_CAMPOS_CIERRE = (
-    "efectivo",
-    "ahorro",
-    "inversiones",
-    "otros_activos",
-    "deudas",
-    "notas",
-)
-
 
 class PatrimonioRepository:
-    """Acceso al balance de activos y pasivos y a los cierres mensuales."""
+    """Acceso a saldos verificados, libros por cuenta y posiciones."""
 
     def __init__(self, db_path: str | None = None) -> None:
         self._db_path = db_path
 
-    # ── Posiciones ───────────────────────────────────────
+    # ── Libros por cuenta ────────────────────────────────
+
+    def libros(self, solo_activas: bool = True) -> dict[int, Libro]:
+        """
+        Devuelve el libro de cada cuenta: sus flujos y sus anclas.
+
+        Es la materia prima para deducir saldos a cualquier fecha; el
+        cálculo vive en el dominio (`Libro`) y aquí sólo se lee.
+        """
+        filtro = "WHERE activa = 1" if solo_activas else ""
+        with connect(self._db_path) as conexion:
+            cuentas = conexion.execute(f"SELECT id FROM cuentas {filtro}").fetchall()
+            flujos = conexion.execute(
+                "SELECT cuenta_id, fecha, movimiento FROM v_flujo_cuentas"
+            ).fetchall()
+            anclas = conexion.execute(
+                "SELECT id, cuenta_id, fecha, saldo, origen FROM saldos_verificados"
+            ).fetchall()
+
+        libros = {int(fila["id"]): Libro() for fila in cuentas}
+        for fila in flujos:
+            libro = libros.get(int(fila["cuenta_id"]))
+            if libro is not None:
+                libro.flujos.append(
+                    Flujo(
+                        fecha=date.fromisoformat(fila["fecha"]),
+                        monto=float(fila["movimiento"]),
+                    )
+                )
+        for fila in anclas:
+            libro = libros.get(int(fila["cuenta_id"]))
+            if libro is not None:
+                libro.anclas.append(
+                    Ancla(
+                        fecha=date.fromisoformat(fila["fecha"]),
+                        saldo=float(fila["saldo"]),
+                        origen=fila["origen"],
+                        id=int(fila["id"]),
+                    )
+                )
+
+        return libros
+
+    def cuentas(self, solo_activas: bool = True) -> pd.DataFrame:
+        """Devuelve las cuentas con su tipo, para etiquetar los saldos."""
+        filtro = "WHERE activa = 1" if solo_activas else ""
+        with connect(self._db_path) as conexion:
+            return pd.read_sql_query(
+                f"SELECT id, nombre, tipo, institucion, activa "
+                f"FROM cuentas {filtro} ORDER BY nombre",
+                conexion,
+            )
+
+    def saldos_a(
+        self,
+        fecha: date,
+        solo_activas: bool = True,
+        libros: dict[int, Libro] | None = None,
+    ) -> pd.DataFrame:
+        """
+        Deduce el saldo de cada cuenta al cierre de `fecha`.
+
+        Parameters
+        ----------
+        libros : dict, optional
+            Los libros ya leídos, para deducir varias fechas seguidas sin
+            volver a la base por cada una.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Una fila por cuenta con `saldo` (signo del libro), `saldo_visto`
+            (como lo enseña el banco), de qué ancla salió y cuántos
+            movimientos median entre el ancla y la fecha.
+        """
+        cuentas = self.cuentas(solo_activas)
+        if libros is None:
+            libros = self.libros(solo_activas)
+
+        filas: list[dict[str, object]] = []
+        for cuenta in cuentas.itertuples():
+            tipo = TipoCuenta(cuenta.tipo)
+            deducido: SaldoDeducido = libros[int(cuenta.id)].saldo_a(fecha)
+            saldo = deducido.saldo
+            filas.append(
+                {
+                    "cuenta_id": int(cuenta.id),
+                    "cuenta": cuenta.nombre,
+                    "tipo": str(tipo),
+                    "institucion": cuenta.institucion,
+                    "lado": str(tipo.lado),
+                    "liquidez": str(tipo.liquidez),
+                    "saldo": saldo,
+                    "saldo_visto": -saldo if tipo.es_pasivo else saldo,
+                    "verificado": deducido.verificado,
+                    "sentido": str(deducido.sentido),
+                    "ancla_fecha": deducido.ancla.fecha if deducido.ancla else None,
+                    "ancla_saldo": deducido.ancla.saldo if deducido.ancla else None,
+                    "ancla_origen": deducido.ancla.origen if deducido.ancla else "",
+                    "movimientos": deducido.movimientos,
+                }
+            )
+
+        df = pd.DataFrame(
+            filas,
+            columns=[
+                "cuenta_id",
+                "cuenta",
+                "tipo",
+                "institucion",
+                "lado",
+                "liquidez",
+                "saldo",
+                "saldo_visto",
+                "verificado",
+                "sentido",
+                "ancla_fecha",
+                "ancla_saldo",
+                "ancla_origen",
+                "movimientos",
+            ],
+        )
+        if not df.empty:
+            df["ancla_fecha"] = pd.to_datetime(df["ancla_fecha"], errors="coerce")
+
+        return df
+
+    def descuadres(self) -> list[tuple[int, Descuadre]]:
+        """Devuelve, por cuenta, los pares de anclas que los movimientos no explican."""
+        hallazgos: list[tuple[int, Descuadre]] = []
+        for cuenta_id, libro in self.libros(solo_activas=False).items():
+            for descuadre in libro.descuadres():
+                hallazgos.append((cuenta_id, descuadre))
+
+        return hallazgos
+
+    # ── Saldos verificados ───────────────────────────────
+
+    def listar_anclas(self) -> pd.DataFrame:
+        """Devuelve los saldos verificados, del más reciente al más viejo."""
+        with connect(self._db_path) as conexion:
+            df = pd.read_sql_query(
+                "SELECT * FROM v_saldos_verificados ORDER BY fecha DESC, cuenta",
+                conexion,
+            )
+
+        if not df.empty:
+            df["fecha"] = pd.to_datetime(df["fecha"])
+
+        return df
+
+    def guardar_ancla(self, ancla: SaldoVerificado) -> int:
+        """
+        Crea o reemplaza el saldo verificado de una cuenta en una fecha.
+
+        Una cuenta cierra un día con un solo saldo: capturarlo dos veces es
+        corregirlo, no duplicarlo.
+        """
+        with connect(self._db_path) as conexion:
+            cursor = conexion.execute(
+                """
+                INSERT INTO saldos_verificados (cuenta_id, fecha, saldo, origen, nota)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(cuenta_id, fecha) DO UPDATE SET
+                    saldo = excluded.saldo,
+                    origen = excluded.origen,
+                    nota = excluded.nota
+                """,
+                (
+                    ancla.cuenta_id,
+                    ancla.fecha.isoformat(),
+                    float(ancla.saldo),
+                    str(ancla.origen),
+                    ancla.nota.strip(),
+                ),
+            )
+            if cursor.lastrowid:
+                return int(cursor.lastrowid)
+
+            fila = conexion.execute(
+                "SELECT id FROM saldos_verificados WHERE cuenta_id = ? AND fecha = ?",
+                (ancla.cuenta_id, ancla.fecha.isoformat()),
+            ).fetchone()
+            return int(fila["id"])
+
+    def eliminar_ancla(self, ancla_id: int) -> None:
+        """Elimina un saldo verificado."""
+        with connect(self._db_path) as conexion:
+            conexion.execute("DELETE FROM saldos_verificados WHERE id = ?", (ancla_id,))
+
+    def cuentas_sin_ancla(self) -> pd.DataFrame:
+        """
+        Devuelve las cuentas activas sin ningún saldo verificado.
+
+        Su saldo se está sumando desde cero, que casi nunca es verdad.
+        """
+        with connect(self._db_path) as conexion:
+            return pd.read_sql_query(
+                """
+                SELECT cu.id, cu.nombre, cu.tipo, cu.institucion
+                FROM cuentas cu
+                WHERE cu.activa = 1
+                  AND NOT EXISTS (
+                      SELECT 1 FROM saldos_verificados sv WHERE sv.cuenta_id = cu.id
+                  )
+                ORDER BY cu.nombre
+                """,
+                conexion,
+            )
+
+    # ── Adeudos a una fecha ──────────────────────────────
+
+    def por_pagar_a(self, fecha: date) -> float:
+        """
+        Suma lo gastado hasta `fecha` que a esa fecha aún no se había pagado.
+
+        Es el pasivo que no está en ninguna cuenta: la renta que se debe,
+        lo que alguien pagó por uno.
+        """
+        with connect(self._db_path) as conexion:
+            fila = conexion.execute(
+                """
+                SELECT COALESCE(SUM(monto), 0) AS total
+                FROM movimientos
+                WHERE tipo = 'Gasto'
+                  AND estado = 'Confirmado'
+                  AND fecha <= ?
+                  AND (fecha_pago IS NULL OR fecha_pago > ?)
+                """,
+                (fecha.isoformat(), fecha.isoformat()),
+            ).fetchone()
+
+        return float(fila["total"])
+
+    def primera_fecha(self) -> date | None:
+        """Devuelve la fecha más antigua con movimientos o anclas, o None."""
+        with connect(self._db_path) as conexion:
+            fila = conexion.execute(
+                """
+                SELECT MIN(fecha) AS fecha FROM (
+                    SELECT MIN(fecha) AS fecha FROM movimientos
+                    UNION ALL
+                    SELECT MIN(fecha) FROM saldos_verificados
+                )
+                """
+            ).fetchone()
+
+        if fila is None or fila["fecha"] is None:
+            return None
+        return date.fromisoformat(fila["fecha"])
+
+    # ── Posiciones que no son cuenta ─────────────────────
 
     def listar(self) -> pd.DataFrame:
         """
-        Devuelve activos y pasivos ordenados por lado del balance y saldo.
+        Devuelve las posiciones capturadas, ordenadas por lado y saldo.
 
-        Lee `v_patrimonio`, que añade el nombre de la cuenta ligada y el
-        aporte con signo al patrimonio neto.
+        Lee `v_patrimonio`, que añade el aporte con signo al patrimonio.
         """
         with connect(self._db_path) as conexion:
             df = pd.read_sql_query(
@@ -58,57 +304,6 @@ class PatrimonioRepository:
             df["fecha_corte"] = pd.to_datetime(df["fecha_corte"], errors="coerce")
 
         return df
-
-    def cuentas_sin_posicion(self) -> pd.DataFrame:
-        """
-        Devuelve las cuentas activas que aún no tienen saldo en el balance.
-
-        Es el pendiente que impide que el estado de situación financiera
-        esté incompleto sin avisar.
-        """
-        with connect(self._db_path) as conexion:
-            return pd.read_sql_query(
-                "SELECT * FROM v_cuentas_sin_posicion ORDER BY nombre", conexion
-            )
-
-    def resumen(self) -> dict[str, float]:
-        """
-        Devuelve activos, pasivos y patrimonio neto.
-
-        Los pasivos incluyen los adeudos generados —lo gastado que aún no
-        se paga—, que se reportan aparte en `por_pagar` porque no son una
-        posición capturada sino la suma de los movimientos devengados.
-        """
-        with connect(self._db_path) as conexion:
-            fila = conexion.execute("SELECT * FROM v_patrimonio_neto").fetchone()
-
-        if fila is None or fila["patrimonio_neto"] is None:
-            return {
-                "activos": 0.0,
-                "pasivos": 0.0,
-                "por_pagar": 0.0,
-                "patrimonio_neto": 0.0,
-            }
-
-        return {
-            "activos": float(fila["activos"]),
-            "pasivos": float(fila["pasivos"]),
-            "por_pagar": float(fila["por_pagar"]),
-            "patrimonio_neto": float(fila["patrimonio_neto"]),
-        }
-
-    def activos_liquidos(self) -> float:
-        """Suma de los activos de liquidez alta: el colchón disponible ya."""
-        with connect(self._db_path) as conexion:
-            fila = conexion.execute(
-                """
-                SELECT COALESCE(SUM(saldo), 0) AS total
-                FROM patrimonio
-                WHERE tipo = 'Activo' AND liquidez = 'Alta'
-                """
-            ).fetchone()
-
-        return float(fila["total"])
 
     def crear(self, posicion: PosicionPatrimonial) -> int:
         """Inserta una posición patrimonial y devuelve su id."""
@@ -136,88 +331,6 @@ class PatrimonioRepository:
         """Elimina una posición patrimonial."""
         with connect(self._db_path) as conexion:
             conexion.execute("DELETE FROM patrimonio WHERE id = ?", (posicion_id,))
-
-    # ── Cierres mensuales ────────────────────────────────
-
-    def listar_cierres(self) -> pd.DataFrame:
-        """Devuelve los cierres con patrimonio neto y cambio mensual."""
-        with connect(self._db_path) as conexion:
-            df = pd.read_sql_query(
-                "SELECT * FROM cierres_mensuales ORDER BY periodo", conexion
-            )
-
-        if df.empty:
-            return df
-
-        df["patrimonio_neto"] = (
-            df["efectivo"] + df["ahorro"] + df["inversiones"] + df["otros_activos"]
-        ) - df["deudas"]
-        df["cambio_mensual"] = df["patrimonio_neto"].diff().fillna(0.0)
-
-        return df
-
-    def guardar_cierre(self, cierre: CierreMensual) -> None:
-        """Crea o actualiza el cierre de un periodo."""
-        columnas = ", ".join(("periodo", *_CAMPOS_CIERRE))
-        marcadores = ", ".join("?" for _ in range(len(_CAMPOS_CIERRE) + 1))
-        actualizaciones = ", ".join(
-            f"{campo} = excluded.{campo}" for campo in _CAMPOS_CIERRE
-        )
-
-        with connect(self._db_path) as conexion:
-            conexion.execute(
-                f"""
-                INSERT INTO cierres_mensuales ({columnas}) VALUES ({marcadores})
-                ON CONFLICT(periodo) DO UPDATE SET {actualizaciones}
-                """,
-                (
-                    cierre.periodo,
-                    float(cierre.efectivo),
-                    float(cierre.ahorro),
-                    float(cierre.inversiones),
-                    float(cierre.otros_activos),
-                    float(cierre.deudas),
-                    cierre.notas.strip(),
-                ),
-            )
-
-    def eliminar_cierre(self, periodo: str) -> None:
-        """Elimina el cierre de un periodo."""
-        with connect(self._db_path) as conexion:
-            conexion.execute(
-                "DELETE FROM cierres_mensuales WHERE periodo = ?", (periodo,)
-            )
-
-    def cierre_desde_patrimonio(self, periodo: str) -> CierreMensual:
-        """
-        Construye el cierre de un periodo a partir del balance actual.
-
-        Agrupa los activos por subtipo para prellenar la captura del cierre,
-        de modo que el usuario sólo confirme en vez de retecleaer saldos.
-        """
-        with connect(self._db_path) as conexion:
-            filas = conexion.execute(
-                "SELECT tipo, subtipo, saldo FROM patrimonio"
-            ).fetchall()
-
-        cierre = CierreMensual(periodo=periodo)
-        for fila in filas:
-            saldo = float(fila["saldo"])
-            if fila["tipo"] == "Pasivo":
-                cierre.deudas += saldo
-                continue
-
-            subtipo = (fila["subtipo"] or "").lower()
-            if "ahorro" in subtipo:
-                cierre.ahorro += saldo
-            elif "invers" in subtipo:
-                cierre.inversiones += saldo
-            elif "efectivo" in subtipo or "banco" in subtipo:
-                cierre.efectivo += saldo
-            else:
-                cierre.otros_activos += saldo
-
-        return cierre
 
 
 def _a_valores_posicion(posicion: PosicionPatrimonial) -> list[object]:

@@ -194,7 +194,7 @@ with datos_tab:
     with st.container(border=True):
         st.subheader("Importar desde el Excel original")
         st.caption(
-            "Trae movimientos, patrimonio, suscripciones, metas, cierres y "
+            "Trae movimientos, patrimonio, suscripciones, metas y "
             "presupuesto. Los registros se **añaden** a lo que ya existe, así "
             "que importar dos veces duplica."
         )

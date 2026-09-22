@@ -117,7 +117,10 @@ resumen_mensual_schema = DataFrameSchema(
         ),
         "ingresos": Column(float, nullable=False, checks=Check.ge(0)),
         "gastos": Column(float, nullable=False, checks=Check.ge(0)),
-        "ahorro_inversion": Column(float, nullable=False, checks=Check.ge(0)),
+        "aportaciones": Column(float, nullable=False, checks=Check.ge(0)),
+        "retiros": Column(float, nullable=False, checks=Check.ge(0)),
+        # Neto: puede ser negativo en un mes en que se sacó más de lo que entró.
+        "ahorro_inversion": Column(float, nullable=False),
         "disponible": Column(
             float,
             nullable=False,

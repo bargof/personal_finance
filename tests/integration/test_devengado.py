@@ -9,6 +9,7 @@ from finanzas.application.services.movimientos_service import (
     MovimientoInvalidoError,
     MovimientosService,
 )
+from finanzas.application.services.patrimonio_service import PatrimonioService
 from finanzas.data.database import connect
 from finanzas.data.repositories.movimientos_repository import MovimientosRepository
 from finanzas.data.repositories.patrimonio_repository import PatrimonioRepository
@@ -258,8 +259,8 @@ def test_pasar_none_a_proposito_si_registra_un_devengado(servicio, ids_catalogo)
 
 
 def test_el_adeudo_entra_al_balance_como_pasivo(servicio, ids_catalogo, db_path):
-    """Deber la tarjeta empobrece igual que un préstamo capturado."""
-    patrimonio = PatrimonioRepository(db_path)
+    """Deber la renta empobrece igual que un préstamo capturado."""
+    patrimonio = PatrimonioService(PatrimonioRepository(db_path))
     assert patrimonio.resumen()["patrimonio_neto"] == 0.0
 
     _gasto(servicio, ids_catalogo, monto=2_500.0, fecha_pago=None)
@@ -270,20 +271,38 @@ def test_el_adeudo_entra_al_balance_como_pasivo(servicio, ids_catalogo, db_path)
     assert resumen["patrimonio_neto"] == -2_500.0
 
 
-def test_pagar_el_adeudo_lo_saca_del_balance(servicio, ids_catalogo, db_path):
-    """Liquidar la deuda la quita de los pasivos."""
-    patrimonio = PatrimonioRepository(db_path)
+def test_pagar_el_adeudo_lo_mueve_a_la_cuenta(servicio, ids_catalogo, db_path):
+    """
+    Liquidar la deuda la quita de los adeudos y la saca de la cuenta.
+
+    El patrimonio no cambia al pagar: ya se debía. Lo que cambia es dónde
+    se ve: antes como adeudo, ahora como 2,500 menos en la cuenta.
+    """
+    patrimonio = PatrimonioService(PatrimonioRepository(db_path))
     movimiento_id = _gasto(servicio, ids_catalogo, fecha_pago=None)
 
     servicio.marcar_pagado(movimiento_id, date(2026, 9, 15))
+    resumen = patrimonio.resumen()
+    saldos = patrimonio.saldos().set_index("cuenta")
 
-    assert patrimonio.resumen()["por_pagar"] == 0.0
-    assert patrimonio.resumen()["patrimonio_neto"] == 0.0
+    assert resumen["por_pagar"] == 0.0
+    assert resumen["patrimonio_neto"] == -2_500.0
+    assert saldos.loc["Cuenta principal", "saldo"] == -2_500.0
+
+
+def test_el_adeudo_a_una_fecha_respeta_cuando_se_pago(servicio, ids_catalogo, db_path):
+    """Visto antes del pago, el gasto seguía debiéndose."""
+    patrimonio = PatrimonioService(PatrimonioRepository(db_path))
+    movimiento_id = _gasto(servicio, ids_catalogo, fecha_pago=None)
+    servicio.marcar_pagado(movimiento_id, date(2026, 9, 15))
+
+    assert patrimonio.resumen(date(2026, 8, 31))["por_pagar"] == 2_500.0
+    assert patrimonio.resumen(date(2026, 9, 15))["por_pagar"] == 0.0
 
 
 def test_los_adeudos_se_suman_a_los_pasivos_capturados(servicio, ids_catalogo, db_path):
     """Las dos clases de pasivo conviven sin pisarse."""
-    patrimonio = PatrimonioRepository(db_path)
+    patrimonio = PatrimonioService(PatrimonioRepository(db_path))
     with connect(db_path) as conexion:
         conexion.execute(
             "INSERT INTO patrimonio (nombre, tipo, saldo) VALUES (?, ?, ?)",
@@ -415,11 +434,12 @@ def test_pagar_la_tarjeta_no_cuenta_el_gasto_dos_veces(servicio, ids_catalogo, c
     """
     El escenario completo: comprar con tarjeta y luego pagarla.
 
-    El consumo se cuenta una vez, en el mes de la compra. El traspaso
-    mueve el dinero entre cuentas sin volver a ser gasto, y el flujo por
-    cuenta deja la tarjeta en cero y el banco en números rojos.
+    El consumo se cuenta una vez, en el mes de la compra, y lo paga la
+    tarjeta en el acto: no queda «por pagar», queda como deuda de la
+    tarjeta. El traspaso mueve el dinero entre cuentas sin volver a ser
+    gasto, y deja la tarjeta en cero y el banco en números rojos.
     """
-    compra_id = servicio.registrar(
+    servicio.registrar(
         fecha=date(2026, 8, 5),
         tipo=TipoMovimiento.GASTO,
         monto=3_200.0,
@@ -428,21 +448,39 @@ def test_pagar_la_tarjeta_no_cuenta_el_gasto_dos_veces(servicio, ids_catalogo, c
         descripcion="Compra con tarjeta",
         fecha_pago=None,
     )
-    assert servicio.total_por_pagar() == 3_200.0
+    flujo = servicio.flujo_por_cuenta().set_index("cuenta")
 
-    servicio.marcar_pagado(compra_id, date(2026, 9, 15))
+    # Aunque se pidió sin fecha de pago, la tarjeta lo pagó: la deuda es suya.
+    assert servicio.total_por_pagar() == 0.0
+    assert flujo.loc["Tarjeta crédito", "flujo_neto"] == -3_200.0
+
     _traspaso(servicio, ids_catalogo, cuentas)
 
     df = servicio.buscar()
     flujo = servicio.flujo_por_cuenta().set_index("cuenta")
 
-    assert servicio.total_por_pagar() == 0.0
     # El gasto se contó una sola vez, y sólo la compra fue gasto.
     assert df["gasto_real"].sum() == 3_200.0
     assert df["impacto_caja"].sum() == -3_200.0
     # La tarjeta se liquidó; el dinero salió del banco.
     assert flujo.loc["Tarjeta crédito", "flujo_neto"] == 0.0
     assert flujo.loc["Cuenta principal", "flujo_neto"] == -3_200.0
+
+
+def test_una_compra_con_tarjeta_no_puede_volver_a_por_pagar(
+    servicio, ids_catalogo, cuentas
+):
+    """Lo que se debe es la tarjeta; el gasto no se «despaga»."""
+    compra_id = servicio.registrar(
+        fecha=date(2026, 8, 5),
+        tipo=TipoMovimiento.GASTO,
+        monto=100.0,
+        categoria_id=ids_catalogo["vivienda"],
+        cuenta_id=cuentas["tarjeta"],
+    )
+
+    with pytest.raises(MovimientoInvalidoError, match="tarjeta"):
+        servicio.marcar_por_pagar(compra_id)
 
 
 def test_el_origen_y_el_destino_no_pueden_coincidir(servicio, ids_catalogo, cuentas):
@@ -458,40 +496,36 @@ def test_el_origen_y_el_destino_no_pueden_coincidir(servicio, ids_catalogo, cuen
         )
 
 
-def test_solo_una_transferencia_admite_cuenta_destino(servicio, ids_catalogo, cuentas):
+def test_un_gasto_ignora_la_cuenta_destino(servicio, ids_catalogo, cuentas):
     """Un gasto sale de una cuenta y no entra a ninguna otra."""
-    with pytest.raises(MovimientoInvalidoError, match="sólo aplica"):
+    gasto_id = servicio.registrar(
+        fecha=date(2026, 9, 15),
+        tipo=TipoMovimiento.GASTO,
+        monto=100.0,
+        categoria_id=ids_catalogo["vivienda"],
+        cuenta_id=cuentas["banco"],
+        cuenta_destino_id=cuentas["tarjeta"],
+    )
+
+    assert servicio.obtener(gasto_id)["cuenta_destino"] == ""
+
+
+def test_un_traspaso_sin_destino_se_rechaza(servicio, ids_catalogo, cuentas):
+    """Sin destino, el libro de una cuenta pierde dinero que no fue a ningún lado."""
+    with pytest.raises(MovimientoInvalidoError, match="destino"):
         servicio.registrar(
             fecha=date(2026, 9, 15),
-            tipo=TipoMovimiento.GASTO,
-            monto=100.0,
+            tipo=TipoMovimiento.TRANSFERENCIA,
+            monto=500.0,
             categoria_id=ids_catalogo["vivienda"],
             cuenta_id=cuentas["banco"],
-            cuenta_destino_id=cuentas["tarjeta"],
+            descripcion="Traspaso sin destino",
         )
 
 
-def test_un_traspaso_sin_destino_sigue_siendo_valido(servicio, ids_catalogo, cuentas):
-    """El destino es opcional: no todo traspaso capturado sabe a dónde fue."""
-    servicio.registrar(
-        fecha=date(2026, 9, 15),
-        tipo=TipoMovimiento.TRANSFERENCIA,
-        monto=500.0,
-        categoria_id=ids_catalogo["vivienda"],
-        cuenta_id=cuentas["banco"],
-        descripcion="Traspaso sin destino",
-    )
-
-    flujo = servicio.flujo_por_cuenta().set_index("cuenta")
-
-    # Sin destino sólo hay pata de origen, así que el flujo no cuadra a cero.
-    assert flujo.loc["Cuenta principal", "flujo_neto"] == -500.0
-    assert "Tarjeta crédito" not in flujo.index
-
-
-def test_un_traspaso_devengado_no_mueve_ninguna_cuenta(servicio, ids_catalogo, cuentas):
-    """El flujo por cuenta sólo cuenta lo que ya se pagó."""
-    servicio.registrar(
+def test_un_traspaso_siempre_esta_pagado(servicio, ids_catalogo, cuentas):
+    """Un traspaso ocurre o no ocurre: no queda «por pagar»."""
+    traspaso_id = servicio.registrar(
         fecha=date(2026, 9, 15),
         tipo=TipoMovimiento.TRANSFERENCIA,
         monto=3_200.0,
@@ -499,6 +533,22 @@ def test_un_traspaso_devengado_no_mueve_ninguna_cuenta(servicio, ids_catalogo, c
         cuenta_id=cuentas["banco"],
         cuenta_destino_id=cuentas["tarjeta"],
         fecha_pago=None,
+    )
+
+    assert servicio.obtener(traspaso_id)["pagado"]
+    assert not servicio.flujo_por_cuenta().empty
+
+
+def test_un_traspaso_pendiente_no_mueve_ninguna_cuenta(servicio, ids_catalogo, cuentas):
+    """Lo proyectado no está en ningún libro hasta que se confirma."""
+    servicio.registrar(
+        fecha=date(2026, 9, 15),
+        tipo=TipoMovimiento.TRANSFERENCIA,
+        monto=3_200.0,
+        categoria_id=ids_catalogo["vivienda"],
+        cuenta_id=cuentas["banco"],
+        cuenta_destino_id=cuentas["tarjeta"],
+        estado=EstadoMovimiento.PENDIENTE,
     )
 
     assert servicio.flujo_por_cuenta().empty
@@ -516,12 +566,15 @@ def test_editar_un_traspaso_conserva_su_destino(servicio, ids_catalogo, cuentas)
 
 
 # ═══════════════════════════════════════════════════════════
-# Lugar y hora
+# Empresa, lugar y hora
+#
+# La empresa es quién cobró; el lugar, dónde. Van aparte
+# porque la misma empresa cobra en muchos sitios.
 # ═══════════════════════════════════════════════════════════
 
 
-def test_un_movimiento_guarda_lugar_y_hora(servicio, ids_catalogo):
-    """Los dos campos opcionales viajan enteros hasta la base y de vuelta."""
+def test_un_movimiento_guarda_empresa_lugar_y_hora(servicio, ids_catalogo):
+    """Los tres campos opcionales viajan enteros hasta la base y de vuelta."""
     from datetime import time as hora_tipo
 
     servicio.registrar(
@@ -530,17 +583,19 @@ def test_un_movimiento_guarda_lugar_y_hora(servicio, ids_catalogo):
         monto=180.0,
         categoria_id=ids_catalogo["vivienda"],
         cuenta_id=ids_catalogo["cuenta"],
-        lugar="Walmart Universidad",
+        empresa="Walmart",
+        lugar="Universidad",
         hora=hora_tipo(19, 30),
     )
     guardado = servicio.buscar().iloc[0]
 
-    assert guardado["lugar"] == "Walmart Universidad"
+    assert guardado["empresa"] == "Walmart"
+    assert guardado["lugar"] == "Universidad"
     assert guardado["hora"] == "19:30"
 
 
-def test_editar_conserva_lugar_y_hora(servicio, ids_catalogo):
-    """Cambiar el monto no debe borrar dónde ni a qué hora fue."""
+def test_editar_conserva_empresa_lugar_y_hora(servicio, ids_catalogo):
+    """Cambiar el monto no debe borrar quién cobró, dónde ni a qué hora."""
     from datetime import time as hora_tipo
 
     movimiento_id = servicio.registrar(
@@ -549,34 +604,44 @@ def test_editar_conserva_lugar_y_hora(servicio, ids_catalogo):
         monto=180.0,
         categoria_id=ids_catalogo["vivienda"],
         cuenta_id=ids_catalogo["cuenta"],
-        lugar="Oxxo",
+        empresa="Oxxo",
+        lugar="Copilco",
         hora=hora_tipo(8, 15),
     )
 
     servicio.actualizar(movimiento_id, monto=200.0)
     guardado = servicio.buscar().iloc[0]
 
-    assert guardado["lugar"] == "Oxxo"
+    assert guardado["empresa"] == "Oxxo"
+    assert guardado["lugar"] == "Copilco"
     assert guardado["hora"] == "08:15"
 
 
-def test_los_lugares_se_ofrecen_por_frecuencia(servicio, ids_catalogo):
+def test_empresas_y_lugares_se_ofrecen_por_frecuencia(servicio, ids_catalogo):
     """El súper de siempre aparece primero en el autocompletado."""
-    for lugar in ("Oxxo", "Walmart", "Walmart", "Walmart", "Oxxo"):
+    for empresa, lugar in (
+        ("Oxxo", "Copilco"),
+        ("Walmart", "Universidad"),
+        ("Walmart", "Universidad"),
+        ("Walmart", "Perisur"),
+        ("Oxxo", "Universidad"),
+    ):
         servicio.registrar(
             fecha=date(2026, 9, 17),
             tipo=TipoMovimiento.GASTO,
             monto=50.0,
             categoria_id=ids_catalogo["vivienda"],
             cuenta_id=ids_catalogo["cuenta"],
+            empresa=empresa,
             lugar=lugar,
         )
 
-    assert servicio.lugares() == ["Walmart", "Oxxo"]
+    assert servicio.empresas() == ["Walmart", "Oxxo"]
+    assert servicio.lugares() == ["Universidad", "Copilco", "Perisur"]
 
 
-def test_la_busqueda_de_texto_tambien_mira_el_lugar(servicio, ids_catalogo):
-    """Si lo que recuerdas es dónde fue, buscarlo debe encontrarlo."""
+def test_la_busqueda_de_texto_mira_empresa_y_lugar(servicio, ids_catalogo):
+    """Si lo que recuerdas es quién cobró o dónde, buscarlo debe encontrarlo."""
     servicio.registrar(
         fecha=date(2026, 9, 17),
         tipo=TipoMovimiento.GASTO,
@@ -584,7 +649,47 @@ def test_la_busqueda_de_texto_tambien_mira_el_lugar(servicio, ids_catalogo):
         categoria_id=ids_catalogo["vivienda"],
         cuenta_id=ids_catalogo["cuenta"],
         descripcion="Café",
-        lugar="Starbucks Perisur",
+        empresa="Starbucks",
+        lugar="Perisur",
     )
 
     assert len(servicio.buscar(texto="Perisur")) == 1
+    assert len(servicio.buscar(texto="Starbucks")) == 1
+
+
+def test_lo_capturado_como_lugar_pasa_a_empresa_al_migrar(tmp_path):
+    """
+    `lugar` nació para el comercio, y eso es la empresa.
+
+    Una base anterior trae «Walmart Universidad» en `lugar`. Al migrar, ese
+    texto queda en `empresa`, y `lugar` nace vacío para el sitio.
+    """
+    from finanzas.data.database import _retirar_vistas
+
+    ruta = tmp_path / "vieja.db"
+    preparar_base(str(ruta))
+    # Se simula el esquema anterior: la columna `lugar` con el comercio
+    # dentro y sin columna `empresa`. Las vistas se quitan antes porque
+    # SQLite no deja tirar una columna que una vista nombra.
+    _retirar_vistas(str(ruta))
+    with connect(str(ruta)) as conexion:
+        conexion.execute("ALTER TABLE movimientos DROP COLUMN empresa")
+        ids = conexion.execute(
+            "SELECT (SELECT id FROM categorias LIMIT 1) AS c, "
+            "(SELECT id FROM cuentas LIMIT 1) AS cu"
+        ).fetchone()
+        conexion.execute(
+            "INSERT INTO movimientos (fecha, tipo, monto, categoria_id, cuenta_id, "
+            "lugar) VALUES ('2026-08-01', 'Gasto', 100, ?, ?, 'Walmart Universidad')",
+            (ids["c"], ids["cu"]),
+        )
+
+    preparar_base(str(ruta))
+
+    with connect(str(ruta)) as conexion:
+        fila = conexion.execute("SELECT empresa, lugar FROM movimientos").fetchone()
+        vista = conexion.execute("SELECT empresa, lugar FROM v_movimientos").fetchone()
+
+    assert fila["empresa"] == "Walmart Universidad"
+    assert fila["lugar"] == ""
+    assert vista["empresa"] == "Walmart Universidad"

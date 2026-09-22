@@ -1,20 +1,21 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import date
 
 import pytest
 
-from finanzas.application.services.patrimonio_service import (
-    CuentaYaEnBalanceError,
-    PatrimonioService,
-)
+from finanzas.application.services.movimientos_service import MovimientosService
+from finanzas.application.services.patrimonio_service import PatrimonioService
 from finanzas.application.services.suscripciones_service import SuscripcionesService
 from finanzas.data.database import connect
 from finanzas.data.repositories.catalogos_repository import CatalogosRepository
+from finanzas.data.repositories.movimientos_repository import MovimientosRepository
 from finanzas.data.repositories.patrimonio_repository import PatrimonioRepository
 from finanzas.data.repositories.suscripciones_repository import SuscripcionesRepository
 from finanzas.data.seed import preparar_base, sembrar_catalogos
-from finanzas.domain.enums import Liquidez, TipoPatrimonio
+from finanzas.domain.enums import TipoMovimiento, TipoPatrimonio
+from finanzas.domain.saldos import Sentido
 
 # ═══════════════════════════════════════════════════════════
 # Integridad del esquema
@@ -100,114 +101,239 @@ def patrimonio(db_path: str) -> PatrimonioService:
     return PatrimonioService(PatrimonioRepository(db_path))
 
 
-def test_una_posicion_ligada_trae_el_nombre_de_su_cuenta(
-    patrimonio: PatrimonioService, ids_catalogo: dict[str, int]
+def test_una_posicion_que_no_es_cuenta_vive_en_el_balance(
+    patrimonio: PatrimonioService,
 ):
-    """El balance resuelve la cuenta ligada sin recapturar su nombre."""
-    patrimonio.crear(
-        nombre="Cuenta principal",
-        tipo=TipoPatrimonio.ACTIVO,
-        saldo=25_000.0,
-        cuenta_id=ids_catalogo["cuenta"],
-        liquidez=Liquidez.ALTA,
-    )
-
-    fila = patrimonio.balance().iloc[0]
-
-    assert fila["cuenta"] == "Cuenta principal"
-    assert fila["aporte_a_patrimonio"] == 25_000.0
-
-
-def test_una_posicion_sin_ligar_deja_la_cuenta_vacia(patrimonio: PatrimonioService):
-    """Lo que no es cuenta —la casa, el auto— vive en el balance sin vínculo."""
+    """Lo que no es cuenta —la casa, el auto— se captura con su valor."""
     patrimonio.crear(nombre="Casa", tipo=TipoPatrimonio.ACTIVO, saldo=1_800_000.0)
 
     fila = patrimonio.balance().iloc[0]
 
     assert fila["cuenta"] == ""
-    assert fila["cuenta_id"] is None or fila["cuenta_id"] != fila["cuenta_id"]
+    assert fila["aporte_a_patrimonio"] == 1_800_000.0
+    assert patrimonio.resumen()["patrimonio_neto"] == 1_800_000.0
 
 
-def test_una_cuenta_no_puede_estar_dos_veces_en_el_balance(
-    patrimonio: PatrimonioService, ids_catalogo: dict[str, int]
-):
-    """Duplicar la cuenta duplicaría su saldo en el patrimonio neto."""
-    patrimonio.crear(
-        nombre="Cuenta principal",
-        tipo=TipoPatrimonio.ACTIVO,
-        saldo=25_000.0,
-        cuenta_id=ids_catalogo["cuenta"],
+def test_actualizar_el_valor_de_una_posicion(patrimonio: PatrimonioService):
+    """La operación ocasional: sólo cambia el número."""
+    posicion_id = patrimonio.crear(
+        nombre="Auto", tipo=TipoPatrimonio.ACTIVO, saldo=250_000.0
     )
 
-    with pytest.raises(CuentaYaEnBalanceError):
-        patrimonio.crear(
-            nombre="La misma cuenta",
-            tipo=TipoPatrimonio.ACTIVO,
-            saldo=1.0,
-            cuenta_id=ids_catalogo["cuenta"],
+    patrimonio.actualizar_saldo(posicion_id, 230_000.0)
+    fila = patrimonio.balance().iloc[0]
+
+    assert fila["saldo"] == 230_000.0
+
+
+# ═══════════════════════════════════════════════════════════
+# Saldos deducidos y verificados
+#
+# El saldo de una cuenta no se captura: se deduce de los
+# movimientos a partir de un saldo verificado. Estas pruebas
+# fijan que la deducción funcione en los dos sentidos y que
+# avise cuando algo no cuadra.
+# ═══════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def movimientos_servicio(db_path: str) -> MovimientosService:
+    """Servicio de movimientos sobre la base de prueba."""
+    return MovimientosService(MovimientosRepository(db_path))
+
+
+def _gasto(servicio, ids, monto: float, dia: int) -> int:
+    return servicio.registrar(
+        fecha=date(2026, 8, dia),
+        tipo=TipoMovimiento.GASTO,
+        monto=monto,
+        categoria_id=ids["vivienda"],
+        cuenta_id=ids["cuenta"],
+    )
+
+
+def test_sin_saldo_verificado_se_suma_desde_cero_y_se_avisa(
+    patrimonio: PatrimonioService, movimientos_servicio, ids_catalogo
+):
+    """Un saldo sin ancla no es mentira, pero tampoco es verdad: se marca."""
+    _gasto(movimientos_servicio, ids_catalogo, 1_000.0, 5)
+
+    saldos = patrimonio.saldos(date(2026, 8, 31)).set_index("cuenta")
+    principal = saldos.loc["Cuenta principal"]
+
+    assert principal["saldo"] == -1_000.0
+    assert not principal["verificado"]
+    assert principal["sentido"] == str(Sentido.SIN_ANCLA)
+    assert "Cuenta principal" in set(patrimonio.cuentas_sin_ancla()["nombre"])
+
+
+def test_el_saldo_se_deduce_hacia_adelante_desde_el_ancla(
+    patrimonio: PatrimonioService, movimientos_servicio, ids_catalogo
+):
+    """Con un saldo verificado antes, se suman los movimientos posteriores."""
+    patrimonio.verificar_saldo(ids_catalogo["cuenta"], date(2026, 7, 31), 10_000.0)
+    _gasto(movimientos_servicio, ids_catalogo, 1_000.0, 5)
+    _gasto(movimientos_servicio, ids_catalogo, 500.0, 20)
+
+    al_10 = patrimonio.saldos(date(2026, 8, 10)).set_index("cuenta")
+    al_31 = patrimonio.saldos(date(2026, 8, 31)).set_index("cuenta")
+
+    assert al_10.loc["Cuenta principal", "saldo"] == 9_000.0
+    assert al_31.loc["Cuenta principal", "saldo"] == 8_500.0
+    assert al_31.loc["Cuenta principal", "sentido"] == str(Sentido.ADELANTE)
+
+
+def test_el_saldo_se_deduce_hacia_atras_desde_el_saldo_de_hoy(
+    patrimonio: PatrimonioService, movimientos_servicio, ids_catalogo
+):
+    """
+    El caso de quien carga estados viejos: sólo sabe cuánto tiene hoy.
+
+    Con el saldo de hoy y los movimientos, el sistema deduce cuánto había
+    al principio.
+    """
+    _gasto(movimientos_servicio, ids_catalogo, 1_000.0, 5)
+    _gasto(movimientos_servicio, ids_catalogo, 500.0, 20)
+    patrimonio.verificar_saldo(ids_catalogo["cuenta"], date(2026, 8, 31), 8_500.0)
+
+    inicio = patrimonio.saldos(date(2026, 7, 31)).set_index("cuenta")
+    medio = patrimonio.saldos(date(2026, 8, 10)).set_index("cuenta")
+
+    assert inicio.loc["Cuenta principal", "saldo"] == 10_000.0
+    assert inicio.loc["Cuenta principal", "sentido"] == str(Sentido.ATRAS)
+    assert medio.loc["Cuenta principal", "saldo"] == 9_000.0
+
+
+def test_dos_saldos_verificados_que_no_cuadran_se_reportan(
+    patrimonio: PatrimonioService, movimientos_servicio, ids_catalogo
+):
+    """Entre dos anclas, los movimientos tienen que explicar la diferencia."""
+    patrimonio.verificar_saldo(ids_catalogo["cuenta"], date(2026, 7, 31), 10_000.0)
+    _gasto(movimientos_servicio, ids_catalogo, 1_000.0, 5)
+    patrimonio.verificar_saldo(ids_catalogo["cuenta"], date(2026, 8, 31), 8_700.0)
+
+    descuadres = patrimonio.descuadres()
+
+    assert len(descuadres) == 1
+    fila = descuadres.iloc[0]
+    assert fila["cuenta"] == "Cuenta principal"
+    assert fila["esperado"] == 9_000.0
+    # Faltan 300 que salieron sin registrarse.
+    assert fila["diferencia"] == -300.0
+
+
+def test_el_saldo_de_una_tarjeta_se_captura_como_lo_ensena_el_banco(
+    patrimonio: PatrimonioService, movimientos_servicio, ids_catalogo
+):
+    """Deber 2,000 se captura como 2,000 y en el libro es -2,000."""
+    patrimonio.verificar_saldo(ids_catalogo["tarjeta"], date(2026, 7, 31), 2_000.0)
+    movimientos_servicio.registrar(
+        fecha=date(2026, 8, 5),
+        tipo=TipoMovimiento.GASTO,
+        monto=500.0,
+        categoria_id=ids_catalogo["vivienda"],
+        cuenta_id=ids_catalogo["tarjeta"],
+    )
+
+    saldos = patrimonio.saldos(date(2026, 8, 31)).set_index("cuenta")
+    tarjeta = saldos.loc["Tarjeta crédito"]
+    resumen = patrimonio.resumen(date(2026, 8, 31))
+
+    assert tarjeta["saldo"] == -2_500.0
+    assert tarjeta["saldo_visto"] == 2_500.0
+    assert tarjeta["lado"] == "Pasivo"
+    assert resumen["pasivos"] == 2_500.0
+
+
+def test_verificar_el_mismo_dia_dos_veces_corrige_en_vez_de_duplicar(
+    patrimonio: PatrimonioService, ids_catalogo
+):
+    """Una cuenta cierra un día con un solo saldo."""
+    patrimonio.verificar_saldo(ids_catalogo["cuenta"], date(2026, 7, 31), 10_000.0)
+    patrimonio.verificar_saldo(ids_catalogo["cuenta"], date(2026, 7, 31), 12_000.0)
+
+    anclas = patrimonio.anclas()
+
+    assert len(anclas) == 1
+    assert anclas.iloc[0]["saldo"] == 12_000.0
+
+
+def test_la_evolucion_mensual_se_deduce(
+    patrimonio: PatrimonioService, movimientos_servicio, ids_catalogo
+):
+    """El cierre de cada mes ya no se captura: sale de los saldos."""
+    patrimonio.verificar_saldo(ids_catalogo["cuenta"], date(2026, 7, 31), 10_000.0)
+    _gasto(movimientos_servicio, ids_catalogo, 1_000.0, 5)
+
+    evolucion = patrimonio.evolucion(hasta=date(2026, 8, 31)).set_index("periodo")
+
+    assert evolucion.loc["2026-07", "patrimonio_neto"] == 10_000.0
+    assert evolucion.loc["2026-08", "patrimonio_neto"] == 9_000.0
+    assert evolucion.loc["2026-08", "cambio_mensual"] == -1_000.0
+
+
+def test_el_balance_capturado_antes_se_convierte_en_saldo_verificado(tmp_path):
+    """
+    Una base vieja traía el saldo de la cuenta como posición del balance.
+
+    Al migrar, ese saldo no se pierde: pasa a ser un saldo verificado en su
+    fecha de corte, que es exactamente lo que era.
+    """
+    ruta = tmp_path / "vieja.db"
+    preparar_base(str(ruta))
+    with connect(str(ruta)) as conexion:
+        cuenta = conexion.execute(
+            "SELECT id FROM cuentas WHERE nombre = 'Tarjeta crédito'"
+        ).fetchone()["id"]
+        conexion.execute(
+            "INSERT INTO patrimonio (nombre, tipo, saldo, cuenta_id, fecha_corte) "
+            "VALUES (?, 'Pasivo', ?, ?, ?)",
+            ("Tarjeta crédito", 8_000.0, cuenta, "2026-08-31"),
         )
 
+    preparar_base(str(ruta))
+    anclas = PatrimonioService(PatrimonioRepository(str(ruta))).anclas()
 
-def test_actualizar_el_saldo_conserva_la_cuenta_ligada(
-    patrimonio: PatrimonioService, ids_catalogo: dict[str, int]
-):
-    """La operación mensual no debe romper el vínculo con la cuenta."""
-    posicion_id = patrimonio.crear(
-        nombre="Cuenta principal",
-        tipo=TipoPatrimonio.ACTIVO,
-        saldo=25_000.0,
-        cuenta_id=ids_catalogo["cuenta"],
+    assert len(anclas) == 1
+    assert anclas.iloc[0]["cuenta"] == "Tarjeta crédito"
+    assert anclas.iloc[0]["saldo"] == -8_000.0
+    with connect(str(ruta)) as conexion:
+        ligadas = conexion.execute(
+            "SELECT COUNT(*) AS n FROM patrimonio WHERE cuenta_id IS NOT NULL"
+        ).fetchone()["n"]
+    assert ligadas == 0
+
+
+def test_las_cuentas_de_banco_viejas_pasan_a_debito(tmp_path):
+    """«Banco» era el tipo genérico; ahora es Débito, y el resto no se toca."""
+    ruta = tmp_path / "vieja.db"
+    conexion = sqlite3.connect(ruta)
+    conexion.executescript(
+        """
+        CREATE TABLE cuentas (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre      TEXT NOT NULL UNIQUE,
+            tipo        TEXT NOT NULL DEFAULT 'Banco',
+            institucion TEXT NOT NULL DEFAULT '',
+            activa      INTEGER NOT NULL DEFAULT 1
+        );
+        INSERT INTO cuentas (nombre, tipo) VALUES
+            ('BBVA TDD', 'Banco'),
+            ('BBVA TDC', 'Crédito'),
+            ('Rara', 'Cripto');
+        """
     )
+    conexion.commit()
+    conexion.close()
 
-    patrimonio.actualizar_saldo(posicion_id, 31_000.0)
-    fila = patrimonio.balance().iloc[0]
+    preparar_base(str(ruta))
+    catalogo = CatalogosRepository(str(ruta))
+    tipos = catalogo.tipos_de_cuentas()
+    nombres = catalogo.mapa_nombre_id("cuentas")
 
-    assert fila["saldo"] == 31_000.0
-    assert fila["cuenta"] == "Cuenta principal"
-
-
-def test_las_cuentas_sin_saldo_se_reportan_como_pendientes(
-    patrimonio: PatrimonioService, ids_catalogo: dict[str, int]
-):
-    """Un balance incompleto tiene que poder decir qué le falta."""
-    pendientes_antes = set(patrimonio.cuentas_sin_posicion()["nombre"])
-    assert "Cuenta principal" in pendientes_antes
-
-    patrimonio.crear(
-        nombre="Cuenta principal",
-        tipo=TipoPatrimonio.ACTIVO,
-        saldo=25_000.0,
-        cuenta_id=ids_catalogo["cuenta"],
-    )
-
-    pendientes = set(patrimonio.cuentas_sin_posicion()["nombre"])
-
-    assert "Cuenta principal" not in pendientes
-    assert pendientes == pendientes_antes - {"Cuenta principal"}
-
-
-def test_borrar_la_cuenta_no_borra_su_saldo_del_balance(
-    patrimonio: PatrimonioService, catalogos, ids_catalogo: dict[str, int]
-):
-    """
-    Dar de baja una cuenta desliga la posición, no la elimina.
-
-    El saldo es un hecho del balance: perderlo al limpiar el catálogo
-    falsearía el patrimonio neto hacia abajo.
-    """
-    patrimonio.crear(
-        nombre="Cuenta principal",
-        tipo=TipoPatrimonio.ACTIVO,
-        saldo=25_000.0,
-        cuenta_id=ids_catalogo["cuenta"],
-    )
-
-    catalogos.eliminar_cuenta(ids_catalogo["cuenta"])
-    fila = patrimonio.balance().iloc[0]
-
-    assert fila["saldo"] == 25_000.0
-    assert fila["cuenta"] == ""
-    assert patrimonio.resumen()["patrimonio_neto"] == 25_000.0
+    assert tipos[nombres["BBVA TDD"]] == "Débito"
+    assert tipos[nombres["BBVA TDC"]] == "Crédito"
+    assert tipos[nombres["Rara"]] == "Otro"
 
 
 # ═══════════════════════════════════════════════════════════

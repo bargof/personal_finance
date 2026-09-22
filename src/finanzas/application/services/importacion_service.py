@@ -8,10 +8,16 @@ from datetime import date, time, timedelta
 import pandas as pd
 
 from finanzas.data.lectores import ResultadoLectura, leer
-from finanzas.data.lectores.base import MovimientoImportado
+from finanzas.data.lectores.base import MovimientoImportado, consolidar_rendimientos
 from finanzas.data.lectores.extraccion import extraer_lineas
 from finanzas.data.repositories.movimientos_repository import MovimientosRepository
-from finanzas.domain.enums import Naturaleza, Necesidad, TipoMovimiento
+from finanzas.domain.enums import (
+    Naturaleza,
+    Necesidad,
+    OrigenSaldo,
+    TipoCuenta,
+    TipoMovimiento,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +94,10 @@ class Candidato:
     naturaleza: str = Naturaleza.VARIABLE
     proyecto: str = ""
     nota: str = ""
-    pagado: bool = False
+    #: Si el dinero ya salió. Lo normal es que sí: el estado de cuenta
+    #: es la prueba. Sólo un gasto desde débito puede desmarcarse, y con
+    #: tarjeta ni se pregunta, porque lo pagó la tarjeta.
+    pagado: bool = True
 
     #: Artículos que venían en la compra. No parten el movimiento: es un
     #: solo gasto con una categoría, y esto es su detalle.
@@ -105,6 +114,7 @@ class Candidato:
     fecha_pago: date | None = None
 
     #: Campos que el documento no trae y el movimiento sí admite.
+    empresa: str = ""
     lugar: str = ""
     hora: str = ""
     etiquetas: str = ""
@@ -139,7 +149,7 @@ class Candidato:
         al comprar. Un abono que no es pago —una devolución, una
         bonificación— queda como ingreso y el usuario decide.
         """
-        if self.origen.es_pago_tarjeta:
+        if self.origen.es_traspaso:
             return str(TipoMovimiento.TRANSFERENCIA)
         return str(
             TipoMovimiento.GASTO if self.origen.es_cargo else TipoMovimiento.INGRESO
@@ -191,6 +201,32 @@ class ResultadoImportacion:
 
     lectura: ResultadoLectura
     candidatos: list[Candidato] = field(default_factory=list)
+
+    #: La cuenta de la que es el documento. Es el origen por defecto de
+    #: cada candidato y la cuenta a la que se anclan los saldos que el
+    #: documento declara.
+    cuenta_id: int | None = None
+
+    @property
+    def anclas(self) -> list[tuple[date, float]]:
+        """
+        Los saldos que el documento declara, como (fecha, saldo visto).
+
+        El saldo inicial es el cierre del día anterior al periodo; el
+        final, el cierre del último día. Son la verdad del banco, y con
+        ellos el sistema puede deducir el saldo de cualquier otro día y
+        avisar si entre dos documentos falta algo.
+        """
+        lectura = self.lectura
+        puntos: list[tuple[date, float]] = []
+        if lectura.periodo_inicio and lectura.saldo_inicial is not None:
+            puntos.append(
+                (lectura.periodo_inicio - timedelta(days=1), lectura.saldo_inicial)
+            )
+        if lectura.periodo_fin and lectura.saldo_final is not None:
+            puntos.append((lectura.periodo_fin, lectura.saldo_final))
+
+        return puntos
 
     @property
     def nuevos(self) -> list[Candidato]:
@@ -245,16 +281,48 @@ class ImportacionService:
             "Leídos %s movimientos de %s", len(lectura.movimientos), lectura.banco
         )
 
-        candidatos = [Candidato(origen=m) for m in lectura.movimientos]
-        self._marcar_duplicados(candidatos, lectura)
+        # Las ganancias de centavos se juntan en un total por mes antes de
+        # proponer nada: nadie quiere revisar veinte líneas de un centavo.
+        lectura.movimientos = consolidar_rendimientos(lectura.movimientos)
 
-        return ResultadoImportacion(lectura=lectura, candidatos=candidatos)
+        candidatos = [Candidato(origen=m) for m in lectura.movimientos]
+        resultado = ResultadoImportacion(lectura=lectura, candidatos=candidatos)
+        resultado.cuenta_id = self.cuenta_sugerida(resultado)
+        self.contrastar(resultado)
+
+        return resultado
+
+    def contrastar(self, resultado: ResultadoImportacion) -> None:
+        """
+        Marca qué candidatos ya están registrados, sabiendo de qué cuenta
+        es el documento.
+
+        Se vuelve a llamar si el usuario cambia la cuenta del documento:
+        la misma cifra en otra cuenta no es el mismo movimiento, y un
+        traspaso ya registrado sólo es «la otra pata» si esta cuenta es
+        uno de sus dos extremos. Lo ya guardado no se toca.
+        """
+        for candidato in resultado.candidatos:
+            if candidato.ya_guardado:
+                continue
+            candidato.estado = NUEVO
+            candidato.motivo = ""
+            candidato.incluir = True
+
+        self._marcar_duplicados(
+            [c for c in resultado.candidatos if not c.ya_guardado],
+            resultado.lectura,
+            resultado.cuenta_id,
+        )
 
     def _marcar_duplicados(
-        self, candidatos: list[Candidato], lectura: ResultadoLectura
+        self,
+        candidatos: list[Candidato],
+        lectura: ResultadoLectura,
+        cuenta_id: int | None = None,
     ) -> None:
         """
-        Compara contra lo registrado por fecha y monto.
+        Compara contra lo registrado por fecha, monto y cuenta.
 
         Cuenta ocurrencias en vez de colapsarlas: dos cafés de cincuenta
         pesos el mismo día son dos movimientos legítimos, así que si la
@@ -264,16 +332,35 @@ class ImportacionService:
             return
 
         # Donde el banco da folio no hace falta adivinar: el mismo folio
-        # es el mismo movimiento, aunque la fecha o el monto difieran.
+        # es el mismo movimiento, aunque la fecha o el monto difieran. Un
+        # folio puede estar solo o dentro de un total de ganancias; en los
+        # dos casos ya está registrado.
         conocidas = self._repo.referencias_externas(
-            [c.origen.referencia for c in candidatos]
+            [r for c in candidatos for r in c.origen.referencias]
         )
         for candidato in candidatos:
-            referencia = candidato.origen.referencia
-            if referencia and referencia in conocidas:
-                candidato.estado = DUPLICADO
+            folios = candidato.origen.referencias
+            vistos = [f for f in folios if f in conocidas]
+            if not vistos:
+                continue
+
+            if candidato.origen.es_total and len(vistos) < len(folios):
+                candidato.estado = POSIBLE
                 candidato.incluir = False
-                candidato.motivo = f"Ya se importó el folio {referencia}."
+                candidato.motivo = (
+                    f"{len(vistos)} de las {len(folios)} ganancias ya están en "
+                    "un total registrado; las demás son nuevas."
+                )
+                continue
+
+            candidato.estado = DUPLICADO
+            candidato.incluir = False
+            if candidato.origen.es_total:
+                candidato.motivo = (
+                    f"Las {len(folios)} ganancias ya están en un total registrado."
+                )
+            else:
+                candidato.motivo = f"Ya se importó el folio {folios[0]}."
 
         registrados = self._registrados_del_rango(lectura)
         if registrados.empty:
@@ -285,28 +372,36 @@ class ImportacionService:
             if candidato.estado != NUEVO:
                 continue
 
-            indice = self._buscar(candidato, registrados, usados, exacto=True)
+            indice = self._buscar(candidato, registrados, usados, cuenta_id, True)
             if indice is not None:
                 usados.add(indice)
                 candidato.estado = DUPLICADO
                 candidato.incluir = False
-                candidato.motivo = (
-                    f"Ya hay un movimiento del {candidato.origen.fecha:%d/%m/%Y} "
-                    f"por {candidato.origen.monto:,.2f}."
+                candidato.motivo = _motivo_duplicado(
+                    candidato, registrados.loc[indice], exacto=True
                 )
                 continue
 
-            indice = self._buscar(candidato, registrados, usados, exacto=False)
+            indice = self._buscar(candidato, registrados, usados, cuenta_id, False)
             if indice is not None:
                 usados.add(indice)
-                fila = registrados.loc[indice]
                 candidato.estado = POSIBLE
                 candidato.incluir = False
+                candidato.motivo = _motivo_duplicado(
+                    candidato, registrados.loc[indice], exacto=False
+                )
+                continue
+
+            # La misma cifra en la misma fecha pero en otra cuenta: casi
+            # siempre es otro movimiento, pero a veces es éste registrado
+            # con la cuenta equivocada. Se avisa sin desmarcar.
+            indice = self._buscar(candidato, registrados, usados, None, True)
+            if indice is not None and cuenta_id is not None:
+                fila = registrados.loc[indice]
                 candidato.motivo = (
-                    f"Hay uno por el mismo monto el "
-                    f"{fila['fecha']:%d/%m/%Y}, a "
-                    f"{abs((fila['fecha'].date() - candidato.origen.fecha).days)} "
-                    f"días de diferencia."
+                    f"Hay uno igual el mismo día pero en {fila['cuenta']}"
+                    + (f" → {fila['cuenta_destino']}" if fila["cuenta_destino"] else "")
+                    + "; si es éste, la cuenta de aquél está mal."
                 )
 
     def _registrados_del_rango(self, lectura: ResultadoLectura) -> pd.DataFrame:
@@ -330,10 +425,17 @@ class ImportacionService:
         candidato: Candidato,
         registrados: pd.DataFrame,
         usados: set[int],
+        cuenta_id: int | None,
         exacto: bool,
     ) -> int | None:
         """
         Busca en lo registrado una coincidencia todavía sin emparejar.
+
+        Con `cuenta_id`, sólo cuentan las filas que tocan esa cuenta del
+        lado correcto: un cargo del documento es un movimiento que salió
+        de esa cuenta; un abono, uno que entró. Un traspaso registrado
+        desde la otra cuenta cumple eso por su otra pata, y así el pago de
+        la tarjeta visto desde los dos estados es un solo movimiento.
 
         Devuelve el índice de la fila, o None si no hay ninguna libre.
         """
@@ -346,6 +448,10 @@ class ImportacionService:
         for indice, fila in iguales.iterrows():
             if indice in usados:
                 continue
+            if cuenta_id is not None and not _toca_la_cuenta(
+                fila, cuenta_id, candidato.origen.es_cargo
+            ):
+                continue
 
             # Se compara contra lo que el banco dijo la vez anterior, no
             # contra la fecha corregida: es lo que va a repetir.
@@ -357,6 +463,88 @@ class ImportacionService:
                 return int(indice)
             if not exacto and distancia <= TOLERANCIA_DIAS:
                 return int(indice)
+
+        return None
+
+    # ── Saldos del documento ─────────────────────────────
+
+    def anclar(self, resultado: ResultadoImportacion) -> int:
+        """
+        Registra como saldos verificados los que el documento declara.
+
+        Un estado de cuenta es la mejor fuente de verdad que hay sobre el
+        saldo: dice cuánto había al empezar y cuánto al terminar. Con eso
+        el sistema deduce el resto y detecta lo que falta.
+
+        Returns
+        -------
+        int
+            Cuántos saldos quedaron registrados.
+        """
+        if resultado.cuenta_id is None:
+            return 0
+
+        from finanzas.application.services.patrimonio_service import (
+            PatrimonioService,
+        )
+        from finanzas.data.repositories.patrimonio_repository import (
+            PatrimonioRepository,
+        )
+
+        servicio = PatrimonioService(PatrimonioRepository(self._db_path))
+        registrados = 0
+        for fecha, saldo in resultado.anclas:
+            servicio.verificar_saldo(
+                resultado.cuenta_id,
+                fecha,
+                saldo,
+                origen=OrigenSaldo.ESTADO_DE_CUENTA,
+                nota=f"{resultado.lectura.banco}",
+            )
+            registrados += 1
+
+        if registrados:
+            logger.info(
+                "Anclados %s saldos de %s", registrados, resultado.lectura.banco
+            )
+
+        return registrados
+
+    def cuenta_sugerida(self, resultado: ResultadoImportacion) -> int | None:
+        """
+        Adivina de qué cuenta es el documento, por su banco y su clase.
+
+        Un estado de tarjeta busca una cuenta de crédito de esa
+        institución; uno de cuenta, una de débito. Si hay varias o
+        ninguna, no adivina: el usuario elige.
+        """
+        from finanzas.data.repositories.catalogos_repository import (
+            CatalogosRepository,
+        )
+
+        cuentas = CatalogosRepository(self._db_path).listar_cuentas()
+        if cuentas.empty:
+            return None
+
+        banco = resultado.lectura.banco.lower()
+        es_tarjeta = "tarjeta" in banco
+        institucion = banco.split("(")[0].strip().replace(" ", "")
+
+        # Un estado de tarjeta es de una cuenta de crédito; uno de cuenta,
+        # de la de débito (no del apartado, que no emite estados).
+        def encaja(tipo: str) -> bool:
+            clase = TipoCuenta(tipo)
+            return clase.es_pasivo if es_tarjeta else clase == TipoCuenta.DEBITO
+
+        misma_institucion = (
+            cuentas["institucion"]
+            .str.lower()
+            .str.replace(" ", "")
+            .str.contains(institucion, regex=False)
+        )
+        candidatas = cuentas[misma_institucion & cuentas["tipo"].map(encaja)]
+        if len(candidatas) == 1:
+            return int(candidatas.iloc[0]["id"])
 
         return None
 
@@ -530,6 +718,7 @@ class ImportacionService:
             # conserva intacta para auditar contra el documento.
             descripcion_banco=candidato.origen.descripcion_banco,
             referencia_externa=candidato.origen.referencia,
+            empresa=candidato.empresa,
             lugar=candidato.lugar,
             hora=time.fromisoformat(candidato.hora) if candidato.hora else None,
             # La del banco, aparte: es la que va a repetir el siguiente
@@ -557,7 +746,12 @@ class ImportacionService:
         return [movimiento_id]
 
     def _fecha_pago(self, candidato: Candidato, pagado: bool) -> date | None:
-        """Resuelve cuándo salió el dinero, si es que ya salió."""
+        """
+        Resuelve cuándo salió el dinero, si es que ya salió.
+
+        Sólo un gasto desde débito puede quedar sin pagar; en todo lo demás
+        el servicio de movimientos pone la fecha aunque aquí llegue None.
+        """
         if not (candidato.pagado or pagado):
             return None
 
@@ -597,6 +791,7 @@ def serializar(resultado: ResultadoImportacion) -> str:
             "saldo_final": resultado.lectura.saldo_final,
             "total_cargos": resultado.lectura.total_cargos,
             "total_abonos": resultado.lectura.total_abonos,
+            "cuenta_id": resultado.cuenta_id,
             "candidatos": [
                 {
                     "origen": {
@@ -610,6 +805,9 @@ def serializar(resultado: ResultadoImportacion) -> str:
                             "referencia",
                             "categoria_banco",
                             "es_pago_tarjeta",
+                            "es_retiro_efectivo",
+                            "es_rendimiento",
+                            "agrupa",
                         )
                     },
                     "estado": c.estado,
@@ -630,6 +828,7 @@ def serializar(resultado: ResultadoImportacion) -> str:
                     "tipo_elegido": c.tipo_elegido,
                     "fecha": _a_json(c.fecha),
                     "fecha_pago": _a_json(c.fecha_pago),
+                    "empresa": c.empresa,
                     "lugar": c.lugar,
                     "hora": c.hora,
                     "etiquetas": c.etiquetas,
@@ -700,6 +899,7 @@ def deserializar(crudo: str) -> ResultadoImportacion:
                 tipo_elegido=crudo_candidato.get("tipo_elegido", ""),
                 fecha=_fecha_de(crudo_candidato.get("fecha")),
                 fecha_pago=_fecha_de(crudo_candidato.get("fecha_pago")),
+                empresa=crudo_candidato.get("empresa", ""),
                 lugar=crudo_candidato.get("lugar", ""),
                 hora=crudo_candidato.get("hora", ""),
                 etiquetas=crudo_candidato.get("etiquetas", ""),
@@ -713,7 +913,63 @@ def deserializar(crudo: str) -> ResultadoImportacion:
             )
         )
 
-    return ResultadoImportacion(lectura=lectura, candidatos=candidatos)
+    return ResultadoImportacion(
+        lectura=lectura, candidatos=candidatos, cuenta_id=datos.get("cuenta_id")
+    )
+
+
+def _toca_la_cuenta(fila: pd.Series, cuenta_id: int, es_cargo: bool) -> bool:
+    """
+    Indica si el movimiento registrado sale de (o entra a) esa cuenta.
+
+    Un cargo del documento sale de la cuenta: coincide con un gasto, un
+    ahorro o un traspaso cuyo origen es ella. Un abono entra: coincide con
+    un ingreso a ella o con un traspaso cuyo destino es ella.
+    """
+    origen = int(fila["cuenta_id"])
+    destino = fila["cuenta_destino_id"]
+    destino = None if destino is None or pd.isna(destino) else int(destino)
+    es_ingreso = fila["tipo"] == str(TipoMovimiento.INGRESO)
+
+    if es_cargo:
+        return origen == cuenta_id and not es_ingreso
+    if es_ingreso:
+        return origen == cuenta_id
+    return destino == cuenta_id
+
+
+def _motivo_duplicado(candidato: Candidato, fila: pd.Series, exacto: bool) -> str:
+    """
+    Explica por qué un candidato parece ya registrado.
+
+    El caso que más confunde es el pago de la tarjeta: aparece en el
+    estado de la tarjeta como abono y en el de la cuenta como cargo, y
+    es un solo traspaso. Cuando lo registrado es un traspaso, se dice
+    así, para que no se importe la otra pata como si fuera otro dinero.
+    """
+    if fila["tipo"] in (
+        str(TipoMovimiento.TRANSFERENCIA),
+        str(TipoMovimiento.AHORRO),
+        str(TipoMovimiento.INVERSION),
+    ):
+        destino = fila.get("cuenta_destino") or "otra cuenta"
+        return (
+            f"Ya está como traspaso {int(fila['id'])}: sale de "
+            f"{fila['cuenta']} y entra a {destino} el {fila['fecha']:%d/%m/%Y}. "
+            "Ésta es su otra pata."
+        )
+
+    if exacto:
+        return (
+            f"Ya hay un movimiento del {candidato.origen.fecha:%d/%m/%Y} "
+            f"por {candidato.origen.monto:,.2f}."
+        )
+
+    return (
+        f"Hay uno por el mismo monto el {fila['fecha']:%d/%m/%Y}, a "
+        f"{abs((fila['fecha'].date() - candidato.origen.fecha).days)} "
+        f"días de diferencia."
+    )
 
 
 def tabla_de(resultado: ResultadoImportacion) -> pd.DataFrame:

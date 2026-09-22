@@ -7,7 +7,7 @@ from finanzas.application.app.components import (
     obtener_servicios,
     reportar_error,
 )
-from finanzas.domain.enums import TipoMovimiento
+from finanzas.domain.enums import TipoCuenta, TipoMovimiento
 
 # ═══════════════════════════════════════════════════════════
 # Catálogos: las listas maestras que mantienen la captura
@@ -208,11 +208,25 @@ with subcategorias_tab:
 # Cuentas
 # ═══════════════════════════════════════════════════════════
 
+#: Qué implica cada tipo, para elegirlo con conocimiento de causa.
+TIPOS_CUENTA = [str(valor) for valor in TipoCuenta]
+AYUDA_TIPO = (
+    "**Efectivo / Débito / Vales**: caja. "
+    "**Ahorro / Inversión**: mover dinero aquí cuenta como ahorro; sacarlo, "
+    "como retiro. El apartado de cada banco va aquí. "
+    "**Crédito / Préstamo**: deuda; comprar con ella la sube y pagarla la "
+    "baja, sin contar el pago como gasto."
+)
+
 with cuentas_tab:
     cuentas = servicios.catalogos.cuentas(solo_activas=False)
 
     with st.container(border=True):
         st.subheader("Cuentas registradas")
+        st.caption(
+            "Cada cuenta es un libro: su saldo se deduce de los movimientos. "
+            "El tipo decide de qué lado del balance cae."
+        )
         st.dataframe(
             cuentas,
             hide_index=True,
@@ -220,6 +234,7 @@ with cuentas_tab:
                 "id": st.column_config.NumberColumn("ID", width="small"),
                 "nombre": st.column_config.TextColumn("Nombre", pinned=True),
                 "tipo": st.column_config.TextColumn("Tipo"),
+                "lado": st.column_config.TextColumn("Lado del balance"),
                 "institucion": st.column_config.TextColumn("Institución"),
                 "activa": st.column_config.CheckboxColumn("Activa"),
             },
@@ -231,11 +246,9 @@ with cuentas_tab:
         st.subheader("Nueva cuenta")
 
         with st.form("nueva_cuenta", clear_on_submit=True, border=False):
-            nombre = st.text_input("Nombre", placeholder="Cuenta nómina")
-            tipo = st.selectbox(
-                "Tipo", ("Banco", "Efectivo", "Crédito", "Inversión", "Otro")
-            )
-            institucion = st.text_input("Institución", placeholder="Banco")
+            nombre = st.text_input("Nombre", placeholder="BBVA Apartado")
+            tipo = st.selectbox("Tipo", TIPOS_CUENTA, index=1, help=AYUDA_TIPO)
+            institucion = st.text_input("Institución", placeholder="BBVA")
 
             if st.form_submit_button(
                 "Crear cuenta", type="primary", icon=":material/add:"
@@ -263,12 +276,14 @@ with cuentas_tab:
             nuevo_nombre = st.text_input(
                 "Nombre", value=actual["nombre"], key=f"cuenta_nombre_{cuenta_id}"
             )
-            tipos = ["Banco", "Efectivo", "Crédito", "Inversión", "Otro"]
             nuevo_tipo = st.selectbox(
                 "Tipo",
-                tipos,
-                index=tipos.index(actual["tipo"]) if actual["tipo"] in tipos else 4,
+                TIPOS_CUENTA,
+                index=TIPOS_CUENTA.index(actual["tipo"])
+                if actual["tipo"] in TIPOS_CUENTA
+                else TIPOS_CUENTA.index(str(TipoCuenta.OTRO)),
                 key=f"cuenta_tipo_{cuenta_id}",
+                help=AYUDA_TIPO,
             )
             nueva_institucion = st.text_input(
                 "Institución",

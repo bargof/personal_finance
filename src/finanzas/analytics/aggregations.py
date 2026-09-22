@@ -31,8 +31,20 @@ MESES_ES = (
 )
 
 
+#: El «periodo» que abarca todo lo registrado. Es el que se muestra por
+#: defecto: un mes concreto es un filtro, no el punto de partida.
+HISTORICO = "Histórico"
+
+
+def es_historico(periodo: str) -> bool:
+    """Indica si el periodo es todo el histórico y no un mes."""
+    return periodo == HISTORICO
+
+
 def etiqueta_periodo(periodo: str) -> str:
-    """Convierte '2026-08' en 'agosto 2026'."""
+    """Convierte '2026-08' en 'agosto 2026'; el histórico se llama así."""
+    if es_historico(periodo):
+        return HISTORICO
     try:
         anio, mes = periodo.split("-")
         return f"{MESES_ES[int(mes) - 1]} {anio}"
@@ -43,6 +55,13 @@ def etiqueta_periodo(periodo: str) -> str:
 def periodo_de(momento: date) -> str:
     """Devuelve el periodo YYYY-MM de una fecha."""
     return momento.strftime("%Y-%m")
+
+
+def meses_entre(desde: str, hasta: str) -> int:
+    """Meses completos entre dos periodos YYYY-MM; cero si es el mismo."""
+    anio_d, mes_d = (int(parte) for parte in desde.split("-"))
+    anio_h, mes_h = (int(parte) for parte in hasta.split("-"))
+    return max(0, (anio_h - anio_d) * 12 + (mes_h - mes_d))
 
 
 def desplazar_periodo(periodo: str, meses: int) -> str:
@@ -179,13 +198,19 @@ def calendario_de_gasto(movimientos: pd.DataFrame, periodo: str) -> pd.DataFrame
     Devuelve el gasto de cada día del periodo, incluidos los días en cero.
 
     Los días sin gasto son la señal que interesa: aparecen explícitos para
-    poder contarlos.
+    poder contarlos. En el histórico, cada día del mes trae el promedio de
+    lo gastado ese día a lo largo de los meses con datos.
     """
-    anio, mes = (int(parte) for parte in periodo.split("-"))
-    dias_del_mes = calendar.monthrange(anio, mes)[1]
-
-    base = pd.DataFrame({"dia": range(1, dias_del_mes + 1)})
-    base["fecha"] = pd.to_datetime([date(anio, mes, dia) for dia in base["dia"]])
+    if es_historico(periodo):
+        meses = int(movimientos["periodo"].nunique()) if not movimientos.empty else 1
+        base = pd.DataFrame({"dia": range(1, 32)})
+        base["fecha"] = pd.NaT
+    else:
+        anio, mes = (int(parte) for parte in periodo.split("-"))
+        dias_del_mes = calendar.monthrange(anio, mes)[1]
+        meses = 1
+        base = pd.DataFrame({"dia": range(1, dias_del_mes + 1)})
+        base["fecha"] = pd.to_datetime([date(anio, mes, dia) for dia in base["dia"]])
 
     if movimientos.empty:
         base["gasto"] = 0.0
@@ -196,7 +221,7 @@ def calendario_de_gasto(movimientos: pd.DataFrame, periodo: str) -> pd.DataFrame
             .rename(columns={"gasto_real": "gasto"})
         )
         base = base.merge(por_dia, on="dia", how="left")
-        base["gasto"] = base["gasto"].fillna(0.0)
+        base["gasto"] = base["gasto"].fillna(0.0) / max(meses, 1)
 
     base["sin_gasto"] = base["gasto"] == 0
 
@@ -266,7 +291,10 @@ def flujo_por_cuenta(movimientos: pd.DataFrame) -> pd.DataFrame:
     columnas_destino = {"cuenta_destino_id", "cuenta_destino"}
     traspasos = df.iloc[0:0]
     if columnas_destino <= set(df.columns):
-        es_traspaso = (df["tipo"] == "Transferencia") & df["cuenta_destino_id"].notna()
+        # Un ahorro o una inversión también tienen dos patas: el dinero
+        # no se fue, cambió de cuenta.
+        mueve = df["tipo"].isin(["Transferencia", "Ahorro", "Inversión"])
+        es_traspaso = mueve & df["cuenta_destino_id"].notna()
         if "pagado" in df.columns:
             es_traspaso &= df["pagado"].astype(bool)
         traspasos = df[es_traspaso]

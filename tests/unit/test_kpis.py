@@ -146,3 +146,17 @@ def test_todo_en_orden_sugiere_subir_la_meta(reglas):
     accion = siguiente_mejor_accion(resumen, reglas, categorias_excedidas=0)
 
     assert "Vas en ruta" in accion
+
+
+def test_un_ahorro_neto_negativo_no_resta_puntos():
+    """Sacar más ahorro del que entró deja el componente en cero, no en negativo."""
+    from finanzas.analytics.kpis import ResumenPeriodo, calcular_score
+    from finanzas.domain.entities import ReglasFinancieras
+
+    resumen = ResumenPeriodo(
+        periodo="2026-08", ingresos=3_000.0, gastos=2_000.0, ahorro_inversion=-4_000.0
+    )
+    score = calcular_score(resumen, ReglasFinancieras())
+
+    assert score.ahorro == 0.0
+    assert score.total >= 0

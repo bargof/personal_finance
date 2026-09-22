@@ -294,22 +294,21 @@ def test_un_deseo_necesita_nombre(deseos):
         deseos.agregar(nombre="   ", costo=100.0)
 
 
-def test_el_saldo_sale_de_las_cuentas_ligadas_al_balance(deseos, db_path):
+def test_el_saldo_sale_de_los_saldos_deducidos(deseos, db_path):
     """
     Se compara contra lo que hay, no contra lo que se capturó como gasto.
 
-    Una cuenta sin posición en el balance todavía no dice cuánto tiene, y
-    por eso no aparece.
+    Una cuenta sin saldo a favor no aparece: no hay con qué comprar.
     """
+    from finanzas.application.services.patrimonio_service import PatrimonioService
+    from finanzas.data.repositories.patrimonio_repository import PatrimonioRepository
+
+    patrimonio = PatrimonioService(PatrimonioRepository(db_path))
     with connect(db_path) as conexion:
         cuenta = conexion.execute(
             "SELECT id FROM cuentas WHERE nombre = 'Cuenta principal'"
         ).fetchone()["id"]
-        conexion.execute(
-            "INSERT INTO patrimonio (nombre, tipo, saldo, cuenta_id, liquidez) "
-            "VALUES (?, 'Activo', ?, ?, 'Alta')",
-            ("Cuenta principal", 15_000.0, cuenta),
-        )
+    patrimonio.verificar_saldo(cuenta, date.today(), 15_000.0)
 
     saldos = deseos.saldos_por_cuenta()
 
@@ -320,15 +319,15 @@ def test_el_saldo_sale_de_las_cuentas_ligadas_al_balance(deseos, db_path):
 
 def test_los_pasivos_no_cuentan_como_saldo_disponible(deseos, db_path):
     """Deber en la tarjeta no es tener con qué comprar."""
+    from finanzas.application.services.patrimonio_service import PatrimonioService
+    from finanzas.data.repositories.patrimonio_repository import PatrimonioRepository
+
+    patrimonio = PatrimonioService(PatrimonioRepository(db_path))
     with connect(db_path) as conexion:
         cuenta = conexion.execute(
             "SELECT id FROM cuentas WHERE nombre = 'Tarjeta crédito'"
         ).fetchone()["id"]
-        conexion.execute(
-            "INSERT INTO patrimonio (nombre, tipo, saldo, cuenta_id) "
-            "VALUES (?, 'Pasivo', ?, ?)",
-            ("Tarjeta crédito", 8_000.0, cuenta),
-        )
+    patrimonio.verificar_saldo(cuenta, date.today(), 8_000.0)
 
     assert deseos.saldos_por_cuenta().empty
 

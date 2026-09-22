@@ -38,13 +38,6 @@ class EstadoMovimiento(StrEnum):
     PENDIENTE = "Pendiente"
 
 
-class TipoPatrimonio(StrEnum):
-    """Lado del balance al que pertenece una cuenta o activo."""
-
-    ACTIVO = "Activo"
-    PASIVO = "Pasivo"
-
-
 class Liquidez(StrEnum):
     """Qué tan rápido puede convertirse un activo en efectivo."""
 
@@ -52,6 +45,77 @@ class Liquidez(StrEnum):
     MEDIA = "Media"
     BAJA = "Baja"
     NO_APLICA = "No aplica"
+
+
+class TipoPatrimonio(StrEnum):
+    """Lado del balance al que pertenece una cuenta o activo."""
+
+    ACTIVO = "Activo"
+    PASIVO = "Pasivo"
+
+
+class TipoCuenta(StrEnum):
+    """
+    Qué clase de cuenta es, y con ello de qué lado del balance cae.
+
+    El tipo decide cosas que antes había que capturar a mano: una tarjeta
+    de crédito es deuda, así que su saldo va en negativo y comprar con
+    ella no toca la caja; un apartado es ahorro, así que mover dinero
+    hacia él cuenta como patrimonio creado y sacarlo como retiro.
+    """
+
+    EFECTIVO = "Efectivo"
+    DEBITO = "Débito"
+    AHORRO = "Ahorro"
+    INVERSION = "Inversión"
+    VALES = "Vales"
+    CREDITO = "Crédito"
+    PRESTAMO = "Préstamo"
+    OTRO = "Otro"
+
+    @property
+    def es_pasivo(self) -> bool:
+        """Indica si el saldo de la cuenta es dinero que se debe."""
+        return self in (TipoCuenta.CREDITO, TipoCuenta.PRESTAMO)
+
+    @property
+    def lado(self) -> TipoPatrimonio:
+        """Lado del balance en el que entra la cuenta."""
+        return TipoPatrimonio.PASIVO if self.es_pasivo else TipoPatrimonio.ACTIVO
+
+    @property
+    def guarda_ahorro(self) -> bool:
+        """Indica si meter dinero aquí cuenta como ahorro o inversión."""
+        return self in (TipoCuenta.AHORRO, TipoCuenta.INVERSION)
+
+    @property
+    def es_liquida(self) -> bool:
+        """Indica si el saldo se puede usar de inmediato."""
+        return self in (TipoCuenta.EFECTIVO, TipoCuenta.DEBITO, TipoCuenta.AHORRO)
+
+    @property
+    def liquidez(self) -> Liquidez:
+        """Liquidez que se deriva del tipo, sin capturarla aparte."""
+        if self.es_pasivo:
+            return Liquidez.NO_APLICA
+        if self.es_liquida:
+            return Liquidez.ALTA
+        if self == TipoCuenta.INVERSION:
+            return Liquidez.MEDIA
+        return Liquidez.BAJA
+
+
+#: Equivalencias de tipos capturados antes de que existiera el catálogo.
+TIPOS_CUENTA_HEREDADOS: dict[str, str] = {
+    "Banco": TipoCuenta.DEBITO,
+}
+
+
+class OrigenSaldo(StrEnum):
+    """De dónde salió un saldo verificado."""
+
+    MANUAL = "Manual"
+    ESTADO_DE_CUENTA = "Estado de cuenta"
 
 
 class Prioridad(StrEnum):

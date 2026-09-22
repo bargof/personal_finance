@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date
 
@@ -134,6 +135,37 @@ def cargar_tablero(periodo: str, version: int) -> TableroPeriodo:
     return obtener_servicios().analytics.tablero(periodo)
 
 
+def tablero_del_periodo(periodo: str) -> TableroPeriodo:
+    """
+    Devuelve el tablero del periodo, cacheado cuando se puede.
+
+    Con el servidor vigilando el código, cambiar un módulo lo recarga; los
+    servicios ya construidos siguen apuntando a las clases viejas y lo que
+    producen ya no se puede serializar para la caché («no es el mismo
+    objeto que…»). Ahí se reconstruyen los servicios y se reintenta; si
+    ni así, se calcula sin caché, que es lento pero no deja la página en
+    blanco. Reiniciar el servidor lo deja como nuevo.
+    """
+    from streamlit.runtime.caching.cache_errors import (
+        UnserializableReturnValueError,
+    )
+
+    try:
+        return cargar_tablero(periodo, version_datos())
+    except UnserializableReturnValueError:
+        logging.getLogger(__name__).warning(
+            "Servicios de una versión anterior del código; se reconstruyen. "
+            "Reinicia el servidor para recuperar la caché."
+        )
+        obtener_servicios.clear()
+        cargar_tablero.clear()
+
+    try:
+        return cargar_tablero(periodo, version_datos())
+    except UnserializableReturnValueError:
+        return obtener_servicios().analytics.tablero(periodo)
+
+
 # ── Formato ──────────────────────────────────────────────
 
 
@@ -169,6 +201,9 @@ def selector_periodo(clave: str = "periodo_activo") -> str:
     if actual not in disponibles:
         disponibles = [actual, *disponibles]
 
+    # El histórico va primero y es el punto de partida; un mes es un filtro.
+    disponibles = [agg.HISTORICO, *disponibles]
+
     if clave in st.session_state and st.session_state[clave] in disponibles:
         indice = disponibles.index(st.session_state[clave])
     else:
@@ -181,6 +216,7 @@ def selector_periodo(clave: str = "periodo_activo") -> str:
             index=indice,
             format_func=agg.etiqueta_periodo,
             key=clave,
+            help="Histórico es todo lo registrado. Elige un mes para filtrar.",
         )
 
     return elegido

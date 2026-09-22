@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import date
+
 import streamlit as st
 
-from finanzas.analytics.aggregations import etiqueta_periodo
+from finanzas.analytics.aggregations import es_historico, etiqueta_periodo, periodo_de
 from finanzas.application.app.components import (
     grafico_presupuesto,
     invalidar_datos,
@@ -21,17 +23,38 @@ from finanzas.application.app.components import (
 # ═══════════════════════════════════════════════════════════
 
 servicios = obtener_servicios()
-periodo = selector_periodo()
+elegido = selector_periodo()
 reglas = servicios.catalogos.reglas()
 
-st.title("Presupuesto")
-st.caption(
-    f"{etiqueta_periodo(periodo)} · el presupuesto activo es tu monto manual "
-    "cuando lo capturas; si lo dejas en cero, se usa el promedio de los "
-    "últimos tres meses menos el recorte."
-)
+# El presupuesto es mensual por naturaleza. En el histórico se edita el
+# del mes en curso y se compara contra el gasto mensual promedio de todos
+# los meses con datos; en un mes concreto, contra el gasto de ese mes.
+historico = es_historico(elegido)
+periodo = periodo_de(date.today()) if historico else elegido
 
-tablero = servicios.presupuesto.tablero(periodo, reglas.alerta_presupuesto)
+st.title("Presupuesto")
+if historico:
+    st.caption(
+        f"Presupuesto de {etiqueta_periodo(periodo)} frente al gasto mensual "
+        "promedio de todo lo registrado. El presupuesto activo es tu monto "
+        "manual; si lo dejas en cero, el promedio de los últimos tres meses "
+        "menos el recorte."
+    )
+else:
+    st.caption(
+        f"{etiqueta_periodo(periodo)} · el presupuesto activo es tu monto manual "
+        "cuando lo capturas; si lo dejas en cero, se usa el promedio de los "
+        "últimos tres meses menos el recorte."
+    )
+
+if historico:
+    todos = servicios.movimientos.buscar()
+    meses = int(todos["periodo"].nunique()) if not todos.empty else 1
+    tablero = servicios.presupuesto.tablero_historico(
+        periodo, todos, meses, reglas.alerta_presupuesto
+    )
+else:
+    tablero = servicios.presupuesto.tablero(periodo, reglas.alerta_presupuesto)
 
 if tablero.empty:
     st.info(
@@ -47,9 +70,11 @@ gasto_total = float(tablero["gasto_del_mes"].sum())
 excedidas = int((tablero["estado"] == "Excedido").sum())
 en_alerta = int((tablero["estado"] == "Atención").sum())
 
+ETIQUETA_GASTO = "Gasto mensual promedio" if historico else "Gasto del mes"
+
 with st.container(horizontal=True):
     st.metric("Presupuesto activo", moneda(presupuesto_total), border=True)
-    st.metric("Gasto del mes", moneda(gasto_total), border=True)
+    st.metric(ETIQUETA_GASTO, moneda(gasto_total), border=True)
     st.metric(
         "Disponible",
         moneda(presupuesto_total - gasto_total),
@@ -110,7 +135,7 @@ with st.container(border=True):
                 "Presupuesto activo", format="$%.0f"
             ),
             "gasto_del_mes": st.column_config.NumberColumn(
-                "Gasto del mes", format="$%.0f"
+                ETIQUETA_GASTO, format="$%.0f"
             ),
             "disponible": st.column_config.NumberColumn("Disponible", format="$%.0f"),
             "pct_usado": st.column_config.ProgressColumn(

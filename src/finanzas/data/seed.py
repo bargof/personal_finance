@@ -6,6 +6,7 @@ from finanzas.config.settings import settings
 from finanzas.data.database import connect, init_database, tabla_vacia
 from finanzas.data.repositories.catalogos_repository import CatalogosRepository
 from finanzas.domain.entities import ReglasFinancieras
+from finanzas.domain.enums import TipoCuenta
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,9 @@ CATEGORIAS_BASE: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("Viajes", "Gasto", ("Hospedaje", "Vuelos")),
     ("Regalos", "Gasto", ("Otro",)),
     ("Impuestos", "Gasto", ("Otro",)),
-    ("Deudas", "Gasto", ("Tarjeta de crédito", "Préstamo")),
+    # Pagar la tarjeta o el capital de un préstamo no es gasto: es un
+    # traspaso a una cuenta de deuda. Lo que sí se gasta son los intereses.
+    ("Deudas", "Gasto", ("Intereses de tarjeta", "Intereses de préstamo")),
     ("Cuidado personal", "Gasto", ("Skincare", "Otro")),
     ("Tecnología", "Gasto", ("Hardware", "Software")),
     ("Donativos", "Gasto", ("Otro",)),
@@ -48,14 +51,15 @@ CATEGORIAS_BASE: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("Traspaso entre cuentas", "Transferencia", ("Otro",)),
 )
 
-#: Cuentas de arranque, con su tipo.
+#: Cuentas de arranque, con su tipo. El tipo no es decorativo: decide de
+#: qué lado del balance cae la cuenta y qué significa mover dinero a ella.
 CUENTAS_BASE: tuple[tuple[str, str], ...] = (
-    ("Efectivo", "Efectivo"),
-    ("Cuenta principal", "Banco"),
-    ("Cuenta ahorro", "Banco"),
-    ("Tarjeta crédito", "Crédito"),
-    ("Inversiones", "Inversión"),
-    ("Otra", "Otro"),
+    ("Efectivo", str(TipoCuenta.EFECTIVO)),
+    ("Cuenta principal", str(TipoCuenta.DEBITO)),
+    ("Cuenta ahorro", str(TipoCuenta.AHORRO)),
+    ("Tarjeta crédito", str(TipoCuenta.CREDITO)),
+    ("Inversiones", str(TipoCuenta.INVERSION)),
+    ("Otra", str(TipoCuenta.OTRO)),
 )
 
 #: Medios de pago del catálogo original.

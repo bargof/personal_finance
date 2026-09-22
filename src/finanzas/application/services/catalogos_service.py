@@ -6,6 +6,7 @@ import pandas as pd
 
 from finanzas.data.repositories.catalogos_repository import CatalogosRepository
 from finanzas.domain.entities import ReglasFinancieras
+from finanzas.domain.enums import TipoCuenta
 
 # ═══════════════════════════════════════════════════════════
 # Catálogos: alta, baja y consulta de las listas maestras.
@@ -41,8 +42,16 @@ class CatalogosService:
         return self._repo.listar_subcategorias(categoria_id)
 
     def cuentas(self, solo_activas: bool = True) -> pd.DataFrame:
-        """Devuelve las cuentas registradas."""
-        return self._repo.listar_cuentas(solo_activas=solo_activas)
+        """Devuelve las cuentas registradas, con el lado del balance que les toca."""
+        df = self._repo.listar_cuentas(solo_activas=solo_activas)
+        if not df.empty:
+            df["lado"] = df["tipo"].map(lambda tipo: str(TipoCuenta(tipo).lado))
+
+        return df
+
+    def tipos_de_cuentas(self) -> dict[int, str]:
+        """Devuelve {id: tipo} de todas las cuentas."""
+        return self._repo.tipos_de_cuentas()
 
     def medios_pago(self, solo_activos: bool = True) -> pd.DataFrame:
         """Devuelve los medios de pago registrados."""
@@ -118,8 +127,9 @@ class CatalogosService:
     # ── Cuentas ──────────────────────────────────────────
 
     def crear_cuenta(self, nombre: str, tipo: str, institucion: str = "") -> int:
-        """Da de alta una cuenta validando que el nombre sea único."""
+        """Da de alta una cuenta; el nombre debe ser único y el tipo, del catálogo."""
         nombre = _validar_nombre(nombre, "cuenta")
+        tipo = _validar_tipo_cuenta(tipo)
 
         try:
             return self._repo.crear_cuenta(nombre, tipo, institucion)
@@ -138,6 +148,7 @@ class CatalogosService:
     ) -> None:
         """Actualiza una cuenta existente."""
         nombre = _validar_nombre(nombre, "cuenta")
+        tipo = _validar_tipo_cuenta(tipo)
 
         try:
             self._repo.actualizar_cuenta(cuenta_id, nombre, tipo, institucion, activa)
@@ -179,6 +190,17 @@ class CatalogosService:
     def guardar_reglas(self, reglas: ReglasFinancieras) -> None:
         """Persiste las reglas financieras."""
         self._repo.guardar_reglas(reglas)
+
+
+def _validar_tipo_cuenta(tipo: str) -> str:
+    """Comprueba que el tipo de cuenta sea uno del catálogo."""
+    try:
+        return str(TipoCuenta(tipo))
+    except ValueError as error:
+        opciones = ", ".join(str(valor) for valor in TipoCuenta)
+        raise ValueError(
+            f"«{tipo}» no es un tipo de cuenta. Elige uno de: {opciones}."
+        ) from error
 
 
 def _validar_nombre(nombre: str, que: str) -> str:

@@ -35,6 +35,7 @@ data/finanzas.db             Base SQLite (ignorada por git)
 scripts/
     init_db.py               Crea el esquema y siembra catálogos
     import_excel.py          Migra el .xlsx original a SQLite
+    cuadrar_registros.py     Corrige lo capturado antes del modelo de cuentas
 src/finanzas/
     config/                  Settings (pydantic-settings) y logging
     domain/                  Entidades, enums y reglas de negocio
@@ -60,28 +61,71 @@ repositorios son los únicos que tocan SQLite.
 | Tabla | Qué guarda |
 |---|---|
 | `categorias`, `subcategorias` | Árbol de clasificación |
-| `cuentas`, `medios_pago` | Dónde y cómo se mueve el dinero |
+| `cuentas`, `medios_pago` | Dónde y cómo se mueve el dinero. El tipo de cuenta decide de qué lado del balance cae |
 | `movimientos` | Una fila por movimiento, siempre con monto positivo |
+| `saldos_verificados` | Lo único del balance que se captura: el saldo real de una cuenta al cierre de un día |
 | `presupuestos` | Monto manual y % de recorte por categoría y periodo |
 | `metas` | Objetivos con monto, fecha y aportación |
-| `patrimonio` | Activos y pasivos con su saldo actual |
+| `patrimonio` | Bienes y deudas que no son cuenta: la casa, el auto |
 | `suscripciones` | Cobros recurrentes normalizados a costo mensual |
-| `cierres_mensuales` | Fotografía del balance al cierre de cada mes |
 | `configuracion` | Reglas editables (metas, umbrales, moneda) |
 
-Tres vistas concentran lo derivado:
+Las vistas concentran lo derivado:
 
 - `v_movimientos` — añade periodo, impacto en caja, gasto real, patrimonio
-  creado e ingreso reconocido, más los nombres de catálogo.
-- `v_resumen_mensual` — ingresos, gastos, ahorro y disponible por periodo.
-- `v_patrimonio_neto` — activos, pasivos y patrimonio neto.
+  creado, ahorro retirado e ingreso reconocido, más los nombres de catálogo.
+- `v_resumen_mensual` — ingresos, gastos, aportaciones, retiros, ahorro neto
+  y disponible por periodo.
+- `v_flujo_cuentas` — el libro: una fila por pata de cada movimiento pagado
+  y confirmado, con su efecto sobre la cuenta.
+
+## Cuentas como libros
+
+Cada cuenta es un libro y todo movimiento confirmado y pagado mueve una o
+dos. El saldo no se captura: se deduce de los movimientos a partir de un
+**saldo verificado** —lo que dice el estado de cuenta al inicio y al fin de
+su periodo, o la app del banco hoy—. Con un saldo verificado *después* de
+los movimientos, el sistema deduce hacia atrás cuánto había al principio,
+que es lo que permite cargar estados de cuenta viejos sin conocer el saldo
+inicial. Entre dos saldos verificados, los movimientos tienen que explicar
+la diferencia; donde no, Patrimonio avisa cuánto falta y en qué cuenta.
+
+| Tipo de cuenta | Lado | Qué implica |
+|---|---|---|
+| Efectivo, Débito, Vales | Activo | Caja |
+| Ahorro, Inversión | Activo | Mover dinero aquí es aportación; sacarlo, retiro. El apartado de cada banco va aquí |
+| Crédito, Préstamo | Pasivo | Deuda: el saldo va en negativo. Comprar la sube; pagarla la baja sin ser gasto |
 
 ## Reglas de captura
 
 - El **monto siempre es positivo**; el `tipo` define su efecto.
-- `Transferencia` mueve dinero entre cuentas propias y no toca ingresos ni
-  gastos.
 - Sólo los movimientos **confirmados** alimentan presupuesto, score y KPIs.
+- Cada tipo captura sólo lo que le corresponde (`domain/captura.py`): un
+  ingreso no es esencial ni deseo, y a un traspaso no se le apuntan
+  productos.
+- Un gasto lleva **empresa** (quién cobró: Walmart, DiDi) y **lugar** (dónde:
+  Mitikah, Coyoacán), los dos de texto libre con lo ya usado como
+  sugerencia.
+- Un gasto con **tarjeta de crédito** queda pagado por la tarjeta en el
+  acto; lo que se debe es la tarjeta. Pagarla después es una
+  `Transferencia` a la tarjeta, nunca otro gasto. Sólo un gasto desde
+  efectivo, débito o ahorro puede quedar «por pagar».
+- `Ahorro` e `Inversión` llevan cuenta de destino obligatoria, de tipo
+  Ahorro o Inversión. Un retiro es una `Transferencia` desde esa cuenta, y
+  el ahorro del mes es **neto**: aportaciones menos retiros.
+- `Transferencia` mueve dinero entre cuentas propias con origen y destino
+  obligatorios: pago de tarjeta, retiro en cajero (a Efectivo), traspaso
+  entre bancos. Si el dinero fue a alguien más, es un gasto. Una
+  transferencia *recibida* de otra cuenta propia tampoco es ingreso: es
+  el traspaso visto desde la cuenta que recibe (el importador la reconoce
+  por el nombre del titular, `TITULAR` en `.env`), y cuando llegue el
+  estado de la cuenta emisora se reconocerá como su otra pata.
+- Al importar un estado de cuenta, sus saldos declarados quedan como saldos
+  verificados de la cuenta, y el pago de la tarjeta visto desde el otro
+  estado se reconoce como la otra pata del mismo traspaso. Las ganancias
+  de intereses de centavos se juntan en un ingreso por mes que conserva
+  todos los folios, y lo que se desmarca en el asistente no se guarda (o
+  se borra, si ya se había guardado).
 
 ## Score financiero
 

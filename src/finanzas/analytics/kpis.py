@@ -148,7 +148,9 @@ def calcular_score(
         punto_ahorro = 0.0
     else:
         avance = resumen.tasa_ahorro / reglas.meta_ahorro_inversion
-        punto_ahorro = min(PESO_AHORRO, avance * PESO_AHORRO)
+        # Un mes en que se sacó más ahorro del que entró no resta puntos
+        # de otros componentes: se queda en cero.
+        punto_ahorro = max(0.0, min(PESO_AHORRO, avance * PESO_AHORRO))
 
     # ── Presupuesto: se penaliza gastar por encima del plan ──
     utilizado = resumen.presupuesto_utilizado

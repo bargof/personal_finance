@@ -36,6 +36,7 @@ _CAMPOS_ESCRITURA = (
     "fecha_pago",
     "descripcion_banco",
     "referencia_externa",
+    "empresa",
     "lugar",
     "hora",
     "fecha_banco",
@@ -47,6 +48,11 @@ class MovimientosRepository:
 
     def __init__(self, db_path: str | None = None) -> None:
         self._db_path = db_path
+
+    @property
+    def db_path(self) -> str | None:
+        """Base a la que apunta, para que otros repositorios miren la misma."""
+        return self._db_path
 
     # ── Lectura ──────────────────────────────────────────
 
@@ -105,10 +111,11 @@ class MovimientosRepository:
         if texto:
             condiciones.append(
                 "(descripcion LIKE ? OR etiquetas LIKE ? OR nota LIKE ? "
-                "OR proyecto LIKE ? OR descripcion_banco LIKE ? OR lugar LIKE ?)"
+                "OR proyecto LIKE ? OR descripcion_banco LIKE ? "
+                "OR empresa LIKE ? OR lugar LIKE ?)"
             )
             patron = f"%{texto}%"
-            parametros.extend([patron] * 6)
+            parametros.extend([patron] * 7)
 
         for columna, valores in (
             ("tipo", tipos),
@@ -206,31 +213,49 @@ class MovimientosRepository:
 
         Donde el banco da folio, la deduplicación no necesita heurística:
         el mismo folio es el mismo movimiento, sin importar que la fecha
-        de operación y la de cargo no coincidan.
+        de operación y la de cargo no coincidan. Un total de ganancias
+        guarda varios folios separados por coma, y un folio dentro de un
+        total cuenta igual que uno solo.
         """
-        limpias = [r.strip() for r in referencias if r and r.strip()]
+        limpias = sorted({r.strip() for r in referencias if r and r.strip()})
         if not limpias:
             return set()
 
-        marcadores = ", ".join("?" for _ in limpias)
         with connect(self._db_path) as conexion:
             filas = conexion.execute(
-                f"SELECT referencia_externa FROM movimientos "
-                f"WHERE referencia_externa IN ({marcadores})",
-                limpias,
+                "SELECT referencia_externa FROM movimientos "
+                "WHERE referencia_externa <> ''"
             ).fetchall()
 
-        return {fila["referencia_externa"] for fila in filas}
+        registradas = {
+            folio.strip()
+            for fila in filas
+            for folio in fila["referencia_externa"].split(",")
+            if folio.strip()
+        }
+        return {folio for folio in limpias if folio in registradas}
+
+    def empresas(self) -> list[str]:
+        """Devuelve las empresas ya usadas, de la más frecuente a la menos."""
+        return self._valores_usados("empresa")
 
     def lugares(self) -> list[str]:
-        """Devuelve los lugares ya usados, para poblar el autocompletado."""
+        """Devuelve los lugares ya usados, del más frecuente al menos."""
+        return self._valores_usados("lugar")
+
+    def _valores_usados(self, columna: str) -> list[str]:
+        """Valores distintos de una columna de texto libre, por frecuencia."""
+        if columna not in ("empresa", "lugar"):
+            raise ValueError(f"Columna sin autocompletado: {columna}")
+
         with connect(self._db_path) as conexion:
             filas = conexion.execute(
-                "SELECT lugar, COUNT(*) AS n FROM movimientos "
-                "WHERE TRIM(lugar) <> '' GROUP BY lugar ORDER BY n DESC, lugar"
+                f"SELECT {columna} AS valor, COUNT(*) AS n FROM movimientos "
+                f"WHERE TRIM({columna}) <> '' "
+                f"GROUP BY {columna} ORDER BY n DESC, {columna}"
             ).fetchall()
 
-        return [fila["lugar"] for fila in filas]
+        return [fila["valor"] for fila in filas]
 
     def nombres_de_proyecto(self) -> list[str]:
         """Devuelve los proyectos ya usados, para poblar el autocompletado."""
@@ -401,6 +426,7 @@ def _a_valores(movimiento: Movimiento) -> list[object]:
         movimiento.fecha_pago.isoformat() if movimiento.fecha_pago else None,
         movimiento.descripcion_banco.strip(),
         movimiento.referencia_externa.strip(),
+        movimiento.empresa.strip(),
         movimiento.lugar.strip(),
         movimiento.hora.strftime("%H:%M") if movimiento.hora else None,
         movimiento.fecha_banco.isoformat() if movimiento.fecha_banco else None,

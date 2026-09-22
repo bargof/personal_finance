@@ -71,7 +71,7 @@ _CATALOGOS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     ("metas", ()),
     ("suscripciones", ()),
     ("presupuestos", ()),
-    ("cierres_mensuales", ()),
+    ("saldos_verificados", ()),
 )
 
 

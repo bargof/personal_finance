@@ -42,12 +42,40 @@ CREATE TABLE IF NOT EXISTS subcategorias (
     UNIQUE (categoria_id, nombre)
 );
 
+-- El tipo de cuenta decide de qué lado del balance cae y qué significa
+-- mover dinero hacia ella: Crédito y Préstamo son deuda, Ahorro e
+-- Inversión son patrimonio, Efectivo y Débito son caja. Una base creada
+-- antes de este catálogo puede traer «Banco», que la migración traduce.
 CREATE TABLE IF NOT EXISTS cuentas (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     nombre      TEXT    NOT NULL UNIQUE,
-    tipo        TEXT    NOT NULL DEFAULT 'Banco',
+    tipo        TEXT    NOT NULL DEFAULT 'Débito'
+                CHECK (tipo IN ('Efectivo', 'Débito', 'Ahorro', 'Inversión',
+                                'Vales', 'Crédito', 'Préstamo', 'Otro')),
     institucion TEXT    NOT NULL DEFAULT '',
     activa      INTEGER NOT NULL DEFAULT 1 CHECK (activa IN (0, 1))
+);
+
+-- ── Saldos verificados ───────────────────────────────────
+--
+-- Lo único del balance que se captura. Un saldo verificado dice «esta
+-- cuenta cerró el día D con S», y de ahí el saldo a cualquier otra fecha
+-- se deduce sumando los movimientos hacia adelante o restándolos hacia
+-- atrás. Restar hacia atrás es lo que permite cargar estados de cuenta
+-- viejos sin saber cuánto había al principio.
+--
+-- `saldo` va con el signo del libro: en una tarjeta, deber es negativo.
+
+CREATE TABLE IF NOT EXISTS saldos_verificados (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    cuenta_id INTEGER NOT NULL REFERENCES cuentas(id) ON DELETE CASCADE,
+    fecha     TEXT    NOT NULL,
+    saldo     REAL    NOT NULL,
+    origen    TEXT    NOT NULL DEFAULT 'Manual'
+              CHECK (origen IN ('Manual', 'Estado de cuenta')),
+    nota      TEXT    NOT NULL DEFAULT '',
+    creado_en TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (cuenta_id, fecha)
 );
 
 CREATE TABLE IF NOT EXISTS medios_pago (
@@ -86,8 +114,11 @@ CREATE TABLE IF NOT EXISTS movimientos (
     nota            TEXT    NOT NULL DEFAULT '',
     estado          TEXT    NOT NULL DEFAULT 'Confirmado'
                     CHECK (estado IN ('Confirmado', 'Pendiente')),
-    -- Cuándo salió el dinero. Nulo significa devengado: el gasto ya
-    -- ocurrió y consume presupuesto, pero todavía no toca la caja.
+    -- Cuándo salió el dinero de una cuenta. Nulo significa devengado: el
+    -- gasto ya ocurrió y consume presupuesto, pero todavía no salió de
+    -- ninguna cuenta. Sólo un gasto pagado desde una cuenta que no es de
+    -- crédito puede quedar nulo: con tarjeta lo paga la tarjeta en el
+    -- acto, y un ingreso, un ahorro o un traspaso ocurren o no ocurren.
     -- `estado` responde otra pregunta —si el movimiento ocurrió de
     -- verdad o es una proyección— y las dos son independientes.
     fecha_pago      TEXT,
@@ -105,9 +136,12 @@ CREATE TABLE IF NOT EXISTS movimientos (
     -- banco va a repetir en el siguiente estado de cuenta, y con la que
     -- se reconoce un movimiento ya importado.
     fecha_banco     TEXT,
-    -- Dónde y a qué hora. El lugar es texto libre porque un comercio no
-    -- es un catálogo; la hora es opcional porque ningún estado de cuenta
-    -- la trae y capturarla a mano es un extra, no una obligación.
+    -- Quién cobró y dónde. `empresa` es el comercio o la marca (Walmart,
+    -- DiDi, Oxxo); `lugar` es el sitio físico (Mitikah, Coyoacán). Los
+    -- dos son texto libre porque ninguno es un catálogo: se ofrecen los
+    -- ya usados para no teclear dos veces distinto. La hora es opcional
+    -- porque ningún estado de cuenta la trae.
+    empresa         TEXT    NOT NULL DEFAULT '',
     lugar           TEXT    NOT NULL DEFAULT '',
     hora            TEXT,
     creado_en       TEXT    NOT NULL DEFAULT (datetime('now')),
@@ -185,10 +219,10 @@ CREATE TABLE IF NOT EXISTS patrimonio (
     fecha_corte TEXT,
     moneda      TEXT    NOT NULL DEFAULT 'MXN',
     notas       TEXT    NOT NULL DEFAULT '',
-    -- Cuenta del catálogo que esta posición representa, cuando la hay.
-    -- Evita capturar dos veces «BBVA TDD»: aquí vive su saldo, allá su
-    -- identidad para la captura de movimientos. Queda nulo en lo que no
-    -- es cuenta (la casa, el auto, un préstamo personal).
+    -- Heredado: antes el saldo de una cuenta vivía aquí. Ahora se deduce
+    -- de los movimientos y de `saldos_verificados`, y la migración
+    -- convierte las posiciones ligadas en saldos verificados. Sólo lo
+    -- que no es cuenta (la casa, el auto) sigue siendo una posición.
     cuenta_id   INTEGER REFERENCES cuentas(id) ON DELETE SET NULL
 );
 
@@ -257,19 +291,6 @@ CREATE TABLE IF NOT EXISTS deseos (
 CREATE INDEX IF NOT EXISTS ix_deseos_pendientes
     ON deseos(comprado_en) WHERE comprado_en IS NULL;
 
--- ── Cierres mensuales ────────────────────────────────────
-
-CREATE TABLE IF NOT EXISTS cierres_mensuales (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    periodo       TEXT    NOT NULL UNIQUE,          -- YYYY-MM
-    efectivo      REAL    NOT NULL DEFAULT 0,
-    ahorro        REAL    NOT NULL DEFAULT 0,
-    inversiones   REAL    NOT NULL DEFAULT 0,
-    otros_activos REAL    NOT NULL DEFAULT 0,
-    deudas        REAL    NOT NULL DEFAULT 0,
-    notas         TEXT    NOT NULL DEFAULT ''
-);
-
 -- ── Importación en curso ─────────────────────────────────
 --
 -- El avance del asistente de importación, para que recargar el navegador
@@ -314,6 +335,9 @@ CREATE INDEX IF NOT EXISTS ix_suscripciones_subcategoria
 CREATE INDEX IF NOT EXISTS ix_movimientos_por_pagar
     ON movimientos(fecha_pago) WHERE fecha_pago IS NULL;
 
+CREATE INDEX IF NOT EXISTS ix_saldos_verificados_cuenta
+    ON saldos_verificados(cuenta_id, fecha);
+
 CREATE INDEX IF NOT EXISTS ix_movimientos_cuenta_destino
     ON movimientos(cuenta_destino_id) WHERE cuenta_destino_id IS NOT NULL;
 """
@@ -342,11 +366,14 @@ SELECT
     COALESCE(s.nombre, '')              AS subcategoria,
     m.cuenta_id,
     cu.nombre                           AS cuenta,
+    cu.tipo                             AS cuenta_tipo,
     m.cuenta_destino_id,
     COALESCE(cd.nombre, '')             AS cuenta_destino,
+    cd.tipo                             AS cuenta_destino_tipo,
     m.medio_pago_id,
     COALESCE(mp.nombre, '')             AS medio_pago,
     m.descripcion,
+    m.empresa,
     m.lugar,
     m.hora,
     m.descripcion_banco,
@@ -376,9 +403,10 @@ SELECT
         WHEN m.tipo = 'Transferencia' THEN  0
         ELSE -m.monto
     END                                 AS impacto_caja,
-    -- Lo que se debe: gasto ya incurrido que aún no se ha pagado.
+    -- Lo que se debe: gasto ya incurrido que aún no se ha pagado desde
+    -- ninguna cuenta. Sólo un gasto puede quedar así.
     CASE
-        WHEN m.tipo IN ('Gasto', 'Ahorro', 'Inversión')
+        WHEN m.tipo = 'Gasto'
          AND m.estado = 'Confirmado'
          AND m.fecha_pago IS NULL
         THEN m.monto ELSE 0
@@ -388,11 +416,28 @@ SELECT
         WHEN m.tipo = 'Gasto' AND m.estado = 'Confirmado' THEN m.monto
         ELSE 0
     END                                 AS gasto_real,
-    -- Patrimonio creado: ahorro e inversión confirmados.
+    -- Patrimonio creado: dinero que entró a una cuenta de ahorro o
+    -- inversión desde una que no lo es. Lo dicen las cuentas, no el
+    -- tipo: un traspaso al apartado también es ahorro, y así aportación
+    -- y retiro se miden con la misma vara.
     CASE
-        WHEN m.tipo IN ('Ahorro', 'Inversión') AND m.estado = 'Confirmado'
+        WHEN m.estado = 'Confirmado'
+         AND m.fecha_pago IS NOT NULL
+         AND m.tipo IN ('Ahorro', 'Inversión', 'Transferencia')
+         AND cd.tipo IN ('Ahorro', 'Inversión')
+         AND cu.tipo NOT IN ('Ahorro', 'Inversión')
         THEN m.monto ELSE 0
     END                                 AS patrimonio_creado,
+    -- Ahorro retirado: dinero que salió de una cuenta de ahorro o
+    -- inversión hacia una que no lo es, o que se gastó desde ahí.
+    CASE
+        WHEN m.estado = 'Confirmado'
+         AND m.fecha_pago IS NOT NULL
+         AND m.tipo IN ('Gasto', 'Transferencia')
+         AND cu.tipo IN ('Ahorro', 'Inversión')
+         AND (cd.tipo IS NULL OR cd.tipo NOT IN ('Ahorro', 'Inversión'))
+        THEN m.monto ELSE 0
+    END                                 AS ahorro_retirado,
     -- Ingreso reconocido: sólo el ingreso confirmado.
     CASE
         WHEN m.tipo = 'Ingreso' AND m.estado = 'Confirmado' THEN m.monto
@@ -405,18 +450,25 @@ LEFT JOIN cuentas       cd ON cd.id = m.cuenta_destino_id
 LEFT JOIN subcategorias s  ON s.id  = m.subcategoria_id
 LEFT JOIN medios_pago   mp ON mp.id = m.medio_pago_id;
 
+-- El ahorro del mes es neto: lo que entró al ahorro menos lo que salió.
+-- Meter 7,000 y sacar 3,000 el mismo mes es haber ahorrado 4,000.
 DROP VIEW IF EXISTS v_resumen_mensual;
 CREATE VIEW v_resumen_mensual AS
 SELECT
     periodo,
     SUM(ingreso_real)      AS ingresos,
     SUM(gasto_real)        AS gastos,
-    SUM(patrimonio_creado) AS ahorro_inversion,
-    SUM(ingreso_real) - SUM(gasto_real) - SUM(patrimonio_creado) AS disponible,
+    SUM(patrimonio_creado) AS aportaciones,
+    SUM(ahorro_retirado)   AS retiros,
+    SUM(patrimonio_creado) - SUM(ahorro_retirado) AS ahorro_inversion,
+    SUM(ingreso_real) - SUM(gasto_real)
+        - (SUM(patrimonio_creado) - SUM(ahorro_retirado)) AS disponible,
     COUNT(*)               AS movimientos
 FROM v_movimientos
 GROUP BY periodo;
 
+-- Posiciones que no son cuenta: la casa, el auto, un préstamo entre
+-- personas. Las cuentas del catálogo no están aquí; su saldo se deduce.
 DROP VIEW IF EXISTS v_patrimonio;
 CREATE VIEW v_patrimonio AS
 SELECT
@@ -429,6 +481,25 @@ SELECT
                                  AS aporte_a_patrimonio
 FROM patrimonio p
 LEFT JOIN cuentas cu ON cu.id = p.cuenta_id;
+
+-- Saldos verificados con el nombre y el tipo de su cuenta.
+DROP VIEW IF EXISTS v_saldos_verificados;
+CREATE VIEW v_saldos_verificados AS
+SELECT
+    sv.id,
+    sv.cuenta_id,
+    cu.nombre   AS cuenta,
+    cu.tipo     AS cuenta_tipo,
+    sv.fecha,
+    sv.saldo,
+    -- Como lo enseña el banco: la deuda de una tarjeta, en positivo.
+    CASE WHEN cu.tipo IN ('Crédito', 'Préstamo') THEN -sv.saldo ELSE sv.saldo END
+                AS saldo_visto,
+    sv.origen,
+    sv.nota,
+    sv.creado_en
+FROM saldos_verificados sv
+JOIN cuentas cu ON cu.id = sv.cuenta_id;
 
 -- Proyectos: agrupan movimientos de cualquier categoría bajo un
 -- esfuerzo común —una mudanza, un viaje, una obra— para poder preguntar
@@ -482,13 +553,14 @@ LEFT JOIN (
     GROUP BY TRIM(m.proyecto)
 ) AS totales ON totales.proyecto = nombres.proyecto;
 
--- Flujo por cuenta, con una fila por pata del movimiento.
+-- Flujo por cuenta, con una fila por pata del movimiento: el libro.
 --
 -- `impacto_caja` mira la caja como un todo, así que una transferencia
 -- entre cuentas propias vale cero. Por cuenta no es neutra: sale de una
 -- y entra en otra, y esa es justo la pregunta de «¿de dónde salió el
--- dinero con que pagué la tarjeta?». Sólo entra lo ya pagado, que es lo
--- único que movió dinero de verdad.
+-- dinero con que pagué la tarjeta?». Un ahorro o una inversión también
+-- tienen dos patas: el dinero no se fue, cambió de cuenta. Sólo entra lo
+-- confirmado y ya pagado, que es lo único que movió dinero de verdad.
 DROP VIEW IF EXISTS v_flujo_cuentas;
 CREATE VIEW v_flujo_cuentas AS
 SELECT
@@ -503,6 +575,7 @@ SELECT
 FROM movimientos m
 JOIN cuentas cu ON cu.id = m.cuenta_id
 WHERE m.fecha_pago IS NOT NULL
+  AND m.estado = 'Confirmado'
 
 UNION ALL
 
@@ -518,7 +591,8 @@ SELECT
 FROM movimientos m
 JOIN cuentas cd ON cd.id = m.cuenta_destino_id
 WHERE m.fecha_pago IS NOT NULL
-  AND m.tipo = 'Transferencia'
+  AND m.estado = 'Confirmado'
+  AND m.tipo IN ('Transferencia', 'Ahorro', 'Inversión')
   AND m.cuenta_destino_id IS NOT NULL;
 
 -- Adeudos generados: lo que ya se gastó y todavía no se paga. Es el
@@ -540,27 +614,7 @@ JOIN categorias c  ON c.id  = m.categoria_id
 JOIN cuentas    cu ON cu.id = m.cuenta_id
 WHERE m.estado = 'Confirmado'
   AND m.fecha_pago IS NULL
-  AND m.tipo IN ('Gasto', 'Ahorro', 'Inversión');
-
--- El patrimonio neto suma las posiciones capturadas y resta los
--- adeudos generados, que son un pasivo aunque no se hayan capturado
--- como posición: deber la tarjeta empobrece igual que un préstamo.
-DROP VIEW IF EXISTS v_patrimonio_neto;
-CREATE VIEW v_patrimonio_neto AS
-SELECT
-    posiciones.activos,
-    posiciones.pasivos_capturados + adeudos.total      AS pasivos,
-    adeudos.total                                      AS por_pagar,
-    posiciones.activos - posiciones.pasivos_capturados - adeudos.total
-                                                       AS patrimonio_neto
-FROM
-    (SELECT
-        COALESCE(SUM(CASE WHEN tipo = 'Activo' THEN saldo ELSE 0 END), 0)
-            AS activos,
-        COALESCE(SUM(CASE WHEN tipo = 'Pasivo' THEN saldo ELSE 0 END), 0)
-            AS pasivos_capturados
-     FROM patrimonio) AS posiciones,
-    (SELECT COALESCE(SUM(monto), 0) AS total FROM v_por_pagar) AS adeudos;
+  AND m.tipo = 'Gasto';
 
 -- Productos con su importe ya calculado y el movimiento al que cuelgan.
 DROP VIEW IF EXISTS v_movimiento_productos;
@@ -615,27 +669,6 @@ SELECT
 FROM deseos d
 LEFT JOIN categorias c ON c.id = d.categoria_id;
 
--- Saldo disponible por cuenta, según el balance capturado.
-DROP VIEW IF EXISTS v_saldos_cuentas;
-CREATE VIEW v_saldos_cuentas AS
-SELECT
-    cu.id           AS cuenta_id,
-    cu.nombre       AS cuenta,
-    cu.tipo,
-    p.saldo,
-    p.liquidez
-FROM cuentas cu
-JOIN patrimonio p ON p.cuenta_id = cu.id
-WHERE cu.activa = 1 AND p.tipo = 'Activo';
-
--- Cuentas del catálogo que aún no tienen su saldo en el balance: el
--- pendiente que la página de patrimonio ofrece resolver de un clic.
-DROP VIEW IF EXISTS v_cuentas_sin_posicion;
-CREATE VIEW v_cuentas_sin_posicion AS
-SELECT cu.id, cu.nombre, cu.tipo, cu.institucion
-FROM cuentas cu
-WHERE cu.activa = 1
-  AND NOT EXISTS (SELECT 1 FROM patrimonio p WHERE p.cuenta_id = cu.id);
 """
 
 
@@ -711,10 +744,20 @@ _COLUMNAS_NUEVAS: tuple[tuple[str, str, str], ...] = (
     ("movimientos", "cuenta_destino_id", "INTEGER REFERENCES cuentas(id)"),
     ("movimientos", "descripcion_banco", "TEXT NOT NULL DEFAULT ''"),
     ("movimientos", "referencia_externa", "TEXT NOT NULL DEFAULT ''"),
+    ("movimientos", "empresa", "TEXT NOT NULL DEFAULT ''"),
     ("movimientos", "lugar", "TEXT NOT NULL DEFAULT ''"),
     ("movimientos", "hora", "TEXT"),
     ("movimientos", "fecha_banco", "TEXT"),
 )
+
+#: Columnas que cambiaron de nombre porque cambiaron de significado.
+#:
+#: `lugar` nació para el comercio —«Walmart Universidad»— y eso es la
+#: empresa; el lugar es dónde está. Renombrar conserva lo capturado bajo
+#: el nombre que le corresponde, y `_COLUMNAS_NUEVAS` añade después el
+#: `lugar` nuevo, vacío. Cada entrada es (tabla, nombre viejo, nombre
+#: nuevo) y sólo aplica si el viejo existe y el nuevo no.
+_RENOMBRES: tuple[tuple[str, str, str], ...] = (("movimientos", "lugar", "empresa"),)
 
 #: Relleno que corre una sola vez, justo tras añadir una columna.
 #:
@@ -758,6 +801,82 @@ _RELLENOS: dict[str, tuple[str, tuple[str, ...]]] = {
 }
 
 
+#: Correcciones de datos que corren en cada arranque.
+#:
+#: Son idempotentes a propósito: cada una deja la base como si el modelo
+#: actual hubiera existido siempre, y no hace nada si ya está así. Van en
+#: orden, porque las de movimientos dependen de que el tipo de cuenta ya
+#: esté traducido.
+#: Cada entrada es (nombre, sentencia, columnas que necesita) con las
+#: columnas como `tabla.columna`; si una base vieja no las tiene, la
+#: corrección se omite en vez de tumbar el arranque.
+_MIGRACIONES_DATOS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    # «Banco» era el tipo genérico antes de que existiera el catálogo de
+    # tipos de cuenta; en él, una cuenta de banco es de débito.
+    (
+        "cuentas.tipo: Banco → Débito",
+        "UPDATE cuentas SET tipo = 'Débito' WHERE tipo = 'Banco'",
+        ("cuentas.tipo",),
+    ),
+    (
+        "cuentas.tipo: desconocido → Otro",
+        """
+        UPDATE cuentas SET tipo = 'Otro'
+         WHERE tipo NOT IN ('Efectivo', 'Débito', 'Ahorro', 'Inversión',
+                            'Vales', 'Crédito', 'Préstamo', 'Otro')
+        """,
+        ("cuentas.tipo",),
+    ),
+    # El saldo de una cuenta ya no se captura como posición: se deduce. Lo
+    # que se había capturado se conserva como saldo verificado a su fecha
+    # de corte, que es exactamente lo que era.
+    (
+        "patrimonio ligado → saldos_verificados",
+        """
+        INSERT OR IGNORE INTO saldos_verificados (cuenta_id, fecha, saldo, origen, nota)
+        SELECT
+            p.cuenta_id,
+            COALESCE(p.fecha_corte, date('now')),
+            CASE WHEN p.tipo = 'Pasivo' THEN -p.saldo ELSE p.saldo END,
+            'Manual',
+            'Migrado del balance capturado'
+        FROM patrimonio p
+        WHERE p.cuenta_id IS NOT NULL
+        """,
+        ("patrimonio.cuenta_id", "patrimonio.fecha_corte", "patrimonio.saldo"),
+    ),
+    (
+        "patrimonio ligado: eliminar",
+        "DELETE FROM patrimonio WHERE cuenta_id IS NOT NULL",
+        ("patrimonio.cuenta_id",),
+    ),
+    # Un ingreso, un ahorro o un traspaso ocurren o no ocurren: no quedan
+    # «por pagar». Lo que estaba sin fecha de pago se paga en su fecha.
+    (
+        "movimientos.fecha_pago: no-gasto",
+        """
+        UPDATE movimientos SET fecha_pago = fecha
+         WHERE fecha_pago IS NULL AND tipo <> 'Gasto'
+        """,
+        ("movimientos.fecha_pago", "movimientos.tipo"),
+    ),
+    # Con tarjeta de crédito el gasto lo paga la tarjeta en el acto; lo
+    # que se debe es la tarjeta, y eso lo dice su saldo.
+    (
+        "movimientos.fecha_pago: crédito",
+        """
+        UPDATE movimientos SET fecha_pago = fecha
+         WHERE fecha_pago IS NULL
+           AND tipo = 'Gasto'
+           AND cuenta_id IN (
+               SELECT id FROM cuentas WHERE tipo IN ('Crédito', 'Préstamo')
+           )
+        """,
+        ("movimientos.fecha_pago", "movimientos.cuenta_id", "cuentas.tipo"),
+    ),
+)
+
+
 def _columnas_de(conexion: sqlite3.Connection, tabla: str) -> set[str]:
     """Devuelve los nombres de columna de una tabla existente."""
     filas = conexion.execute(f"PRAGMA table_info({tabla})").fetchall()
@@ -776,6 +895,14 @@ def aplicar_migraciones(db_path: Path | str | None = None) -> list[str]:
     aplicadas: list[str] = []
 
     with connect(db_path) as conexion:
+        for tabla, vieja, nueva in _RENOMBRES:
+            presentes = _columnas_de(conexion, tabla)
+            if vieja in presentes and nueva not in presentes:
+                conexion.execute(
+                    f"ALTER TABLE {tabla} RENAME COLUMN {vieja} TO {nueva}"
+                )
+                aplicadas.append(f"{tabla}.{vieja} → {nueva}")
+
         for tabla, columna, definicion in _COLUMNAS_NUEVAS:
             if columna in _columnas_de(conexion, tabla):
                 continue
@@ -796,10 +923,43 @@ def aplicar_migraciones(db_path: Path | str | None = None) -> list[str]:
 
             aplicadas.append(f"{tabla}.{columna}")
 
+        for nombre, sentencia, requiere in _MIGRACIONES_DATOS:
+            faltan = [
+                columna
+                for columna in requiere
+                if columna.split(".")[1]
+                not in _columnas_de(conexion, columna.split(".")[0])
+            ]
+            if faltan:
+                logger.warning("Corrección «%s» omitida: falta %s", nombre, faltan)
+                continue
+
+            cursor = conexion.execute(sentencia)
+            if cursor.rowcount > 0:
+                aplicadas.append(f"{nombre} ({cursor.rowcount})")
+
     if aplicadas:
         logger.info("Migraciones aplicadas: %s", ", ".join(aplicadas))
 
     return aplicadas
+
+
+def _retirar_vistas(db_path: Path | str | None) -> None:
+    """
+    Borra todas las vistas antes de migrar.
+
+    Se recrean completas justo después, así que no se pierde nada; y
+    quitarlas antes evita dos problemas: que una vista retirada siga viva
+    apuntando a columnas que ya no significan lo mismo, y que un `RENAME
+    COLUMN` —que reescribe las vistas que la nombran— tropiece con una
+    vista vieja que ya no compila.
+    """
+    with connect(db_path) as conexion:
+        vistas = conexion.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'view'"
+        ).fetchall()
+        for fila in vistas:
+            conexion.execute(f"DROP VIEW IF EXISTS {fila['name']}")
 
 
 def init_database(db_path: Path | str | None = None) -> None:
@@ -813,6 +973,7 @@ def init_database(db_path: Path | str | None = None) -> None:
 
     # Antes de las vistas: `v_patrimonio` lee `cuenta_id`, que en una base
     # creada con el esquema anterior sólo existe después de migrar.
+    _retirar_vistas(db_path)
     aplicar_migraciones(db_path)
 
     with connect(db_path) as conexion:

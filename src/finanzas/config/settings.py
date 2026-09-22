@@ -32,6 +32,15 @@ class Settings(BaseSettings):
         description="Nombre del archivo SQLite",
     )
 
+    # --- Titular ---
+    titular: str = Field(
+        default="Fernando Barrios",
+        description=(
+            "Cómo aparece el titular en los estados de cuenta. Una transferencia "
+            "con este nombre en el otro extremo es entre cuentas propias."
+        ),
+    )
+
     # --- Fuente de migración inicial ---
     excel_source: Path = Field(
         default=Path("../Sistema_Financiero_Personal.xlsx"),

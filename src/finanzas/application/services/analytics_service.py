@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 
 import pandas as pd
 
@@ -11,6 +12,7 @@ from finanzas.analytics.kpis import (
     calcular_score,
     siguiente_mejor_accion,
 )
+from finanzas.application.services.patrimonio_service import PatrimonioService
 from finanzas.application.services.presupuesto_service import PresupuestoService
 from finanzas.data.repositories.catalogos_repository import CatalogosRepository
 from finanzas.data.repositories.movimientos_repository import MovimientosRepository
@@ -44,10 +46,20 @@ class TableroPeriodo:
     categorias_excedidas: int
     accion_sugerida: str
 
+    #: Cuántos meses con datos abarca. Uno en un mes concreto; en el
+    #: histórico, los que haya, y lo comparable con un presupuesto mensual
+    #: es entonces el promedio.
+    meses: int = 1
+
     @property
     def etiqueta(self) -> str:
         """Nombre legible del periodo, por ejemplo 'agosto 2026'."""
         return agg.etiqueta_periodo(self.periodo)
+
+    @property
+    def es_historico(self) -> bool:
+        """Indica si abarca todo lo registrado y no un mes."""
+        return agg.es_historico(self.periodo)
 
     @property
     def hay_datos(self) -> bool:
@@ -76,7 +88,9 @@ class AnalyticsService:
     ) -> None:
         self._movimientos = movimientos or MovimientosRepository()
         self._presupuesto = presupuesto or PresupuestoService()
-        self._patrimonio = patrimonio or PatrimonioRepository()
+        # El balance se deduce, no se lee: el servicio de patrimonio es
+        # quien sabe sumar libros y anclas.
+        self._patrimonio = PatrimonioService(patrimonio or PatrimonioRepository())
         self._suscripciones = suscripciones or SuscripcionesRepository()
         self._catalogos = catalogos or CatalogosRepository()
 
@@ -89,7 +103,10 @@ class AnalyticsService:
         Parameters
         ----------
         periodo : str
-            Periodo en formato YYYY-MM.
+            Periodo en formato YYYY-MM, o `HISTORICO` para todo lo
+            registrado. En el histórico las cifras son totales; lo que se
+            compara contra el presupuesto —que es mensual— es el promedio
+            por mes, y la tendencia abarca desde el primer mes con datos.
 
         Returns
         -------
@@ -104,8 +121,14 @@ class AnalyticsService:
             donde los datos pasan de la base a los cálculos.
         """
         reglas = self._catalogos.leer_reglas()
-        movimientos = self._movimientos.del_periodo(periodo)
+        historico = agg.es_historico(periodo)
+        referencia = agg.periodo_de(date.today()) if historico else periodo
 
+        movimientos = (
+            self._movimientos.listar()
+            if historico
+            else self._movimientos.del_periodo(periodo)
+        )
         if not movimientos.empty:
             movimientos = validar_movimientos(movimientos)
 
@@ -113,10 +136,30 @@ class AnalyticsService:
         if not resumen_mensual.empty:
             resumen_mensual = validar_resumen_mensual(resumen_mensual)
 
-        tablero_presupuesto = self._presupuesto.tablero(
-            periodo, reglas.alerta_presupuesto
+        meses = 1
+        ventana = 12
+        if historico:
+            meses = (
+                max(1, int(movimientos["periodo"].nunique()))
+                if not movimientos.empty
+                else 1
+            )
+            if not resumen_mensual.empty:
+                primero = str(resumen_mensual["periodo"].min())
+                ventana = max(12, agg.meses_entre(primero, referencia) + 1)
+
+        if historico:
+            tablero_presupuesto = self._presupuesto.tablero_historico(
+                referencia, movimientos, meses, reglas.alerta_presupuesto
+            )
+        else:
+            tablero_presupuesto = self._presupuesto.tablero(
+                periodo, reglas.alerta_presupuesto
+            )
+
+        resumen = self._construir_resumen(
+            periodo, movimientos, tablero_presupuesto, referencia, meses
         )
-        resumen = self._construir_resumen(periodo, movimientos, tablero_presupuesto)
         score = calcular_score(resumen, reglas)
 
         excedidas = (
@@ -131,12 +174,13 @@ class AnalyticsService:
             resumen=resumen,
             score=score,
             movimientos=movimientos,
-            tendencia=agg.tendencia_mensual(resumen_mensual, periodo),
+            tendencia=agg.tendencia_mensual(resumen_mensual, referencia, ventana),
             presupuesto=tablero_presupuesto,
             por_categoria=agg.gasto_por_categoria(movimientos),
             fugas=agg.fugas(movimientos, reglas.umbral_gasto_pequeno),
             categorias_excedidas=excedidas,
             accion_sugerida=siguiente_mejor_accion(resumen, reglas, excedidas),
+            meses=meses,
         )
 
     # ── Cortes individuales ──────────────────────────────
@@ -168,26 +212,42 @@ class AnalyticsService:
         periodo: str,
         movimientos: pd.DataFrame,
         presupuesto: pd.DataFrame,
+        referencia: str | None = None,
+        meses: int = 1,
     ) -> ResumenPeriodo:
-        """Reúne las cifras base del periodo desde sus distintas fuentes."""
+        """
+        Reúne las cifras base del periodo desde sus distintas fuentes.
+
+        `referencia` es el mes contra el que se mira lo mensual (fondo de
+        emergencia, presupuesto); en un mes concreto es él mismo. `meses`
+        escala el presupuesto mensual al total del periodo, para que el
+        % usado del histórico sea «gasto mensual promedio sobre presupuesto».
+        """
         resumen = ResumenPeriodo(periodo=periodo)
+        referencia = referencia or periodo
 
         if not movimientos.empty:
             resumen.ingresos = float(movimientos["ingreso_real"].sum())
             resumen.gastos = float(movimientos["gasto_real"].sum())
-            resumen.ahorro_inversion = float(movimientos["patrimonio_creado"].sum())
+            # Ahorro neto: lo que entró al ahorro menos lo que salió de él.
+            resumen.ahorro_inversion = float(
+                movimientos["patrimonio_creado"].sum()
+                - movimientos["ahorro_retirado"].sum()
+            )
             resumen.movimientos = int(len(movimientos))
 
             esenciales = movimientos[movimientos["necesidad"] == "Esencial"]
             resumen.gasto_esencial = float(esenciales["gasto_real"].sum())
 
         if not presupuesto.empty:
-            resumen.presupuesto_total = float(presupuesto["presupuesto_activo"].sum())
+            resumen.presupuesto_total = float(
+                presupuesto["presupuesto_activo"].sum() * max(meses, 1)
+            )
 
         resumen.activos_liquidos = self._patrimonio.activos_liquidos()
         resumen.patrimonio_neto = self._patrimonio.resumen()["patrimonio_neto"]
         resumen.suscripciones_mensuales = self._suscripciones.costo_mensual_total()
-        resumen.gasto_esencial_promedio_3m = self._gasto_esencial_promedio(periodo)
+        resumen.gasto_esencial_promedio_3m = self._gasto_esencial_promedio(referencia)
 
         return resumen
 

@@ -272,8 +272,52 @@ def test_mp_cuenta_marca_los_traspasos_entre_cuentas_propias():
     movimientos = leer(MP_CUENTA.splitlines()).movimientos
     ganancia = next(m for m in movimientos if "Ganancia" in m.descripcion_banco)
 
-    assert not ganancia.es_pago_tarjeta
-    assert sum(1 for m in movimientos if m.es_pago_tarjeta) == 4
+    assert not ganancia.es_traspaso
+    assert sum(1 for m in movimientos if m.es_traspaso) == 4
+    # Y cada uno sabe de qué clase es: apartado o transferencia propia.
+    assert sum(1 for m in movimientos if m.es_apartado) == 2
+    assert sum(1 for m in movimientos if m.es_traspaso_propio) == 2
+    assert not any(m.es_pago_tarjeta for m in movimientos)
+
+
+def test_mp_cuenta_marca_el_pago_de_la_tarjeta():
+    """«Pago Tarjeta de crédito» en la cuenta es el traspaso a la tarjeta."""
+    documento = (
+        MP_CUENTA + "\n20-06-2026;Pago Tarjeta de crédito;164100000001;-1,002.99;0.00"
+    )
+    movimientos = leer(documento.splitlines()).movimientos
+    pago = next(m for m in movimientos if "Pago Tarjeta" in m.descripcion_banco)
+
+    assert pago.es_pago_tarjeta
+    assert pago.es_traspaso
+    assert pago.es_cargo
+
+
+def test_una_transferencia_recibida_de_uno_mismo_es_traspaso(importacion):
+    """
+    Un abono que viene de otra cuenta propia no es ingreso: el dinero ya
+    era de uno. Se sugiere como traspaso; una de otra persona sí es ingreso.
+    """
+    documento = (
+        MP_CUENTA
+        + "\n21-06-2026;Transferencia recibida CAMILA;164100000002;100.00;0.00"
+    )
+    resultado = importacion.leer_documento(documento.encode())
+    propia = next(
+        c
+        for c in resultado.candidatos
+        if "recibida FERNANDO" in c.origen.descripcion_banco
+    )
+    ajena = next(
+        c
+        for c in resultado.candidatos
+        if "recibida CAMILA" in c.origen.descripcion_banco
+    )
+
+    assert propia.origen.es_traspaso_propio
+    assert propia.tipo_sugerido == "Transferencia"
+    assert not ajena.origen.es_traspaso
+    assert ajena.tipo_sugerido == "Ingreso"
 
 
 def test_mp_cuenta_lee_los_saldos_de_la_cabecera():
@@ -469,22 +513,99 @@ def test_guardar_conserva_el_concepto_del_banco(importacion, servicio, ids_catal
     assert guardado["descripcion_banco"] == "LIVERPOOL MITIKAH"
 
 
-def test_lo_importado_de_una_tarjeta_nace_devengado(
+def test_lo_importado_de_una_tarjeta_queda_pagado_por_la_tarjeta(
     importacion, servicio, ids_catalogo
 ):
     """
-    El consumo ocurrió, pero el dinero sale hasta el corte.
+    El consumo lo pagó la tarjeta en el acto: no queda «por pagar».
 
-    Marcarlo pagado al importar movería la caja antes de tiempo.
+    Lo que se debe es la tarjeta, y eso lo dice el saldo de la tarjeta,
+    no el gasto. Aunque quien importa pida `pagado=False`, la regla de la
+    cuenta manda.
     """
     resultado = importacion.leer_documento(MP_TARJETA.encode())
     candidato = resultado.candidatos[0]
     candidato.categoria_id = ids_catalogo["vivienda"]
+    candidato.cuenta_id = ids_catalogo["tarjeta"]
+
+    importacion.guardar([candidato], ids_catalogo["tarjeta"], pagado=False)
+    flujo = servicio.flujo_por_cuenta().set_index("cuenta")
+
+    assert servicio.total_por_pagar() == 0.0
+    assert flujo.loc["Tarjeta crédito", "flujo_neto"] == -candidato.origen.monto
+
+
+def test_un_gasto_importado_desde_debito_si_puede_quedar_por_pagar(
+    importacion, servicio, ids_catalogo
+):
+    """Desde una cuenta de débito, la pregunta sigue existiendo."""
+    resultado = importacion.leer_documento(MP_TARJETA.encode())
+    candidato = resultado.candidatos[0]
+    candidato.categoria_id = ids_catalogo["vivienda"]
     candidato.cuenta_id = ids_catalogo["cuenta"]
+    candidato.pagado = False
 
     importacion.guardar([candidato], ids_catalogo["cuenta"], pagado=False)
 
     assert servicio.total_por_pagar() == candidato.origen.monto
+
+
+def test_el_pago_de_la_tarjeta_visto_desde_la_cuenta_es_la_otra_pata(
+    importacion, servicio, ids_catalogo
+):
+    """
+    El mismo pago aparece en los dos estados: como abono en la tarjeta y
+    como cargo en la cuenta. Es un solo traspaso, y al importar el segundo
+    documento se reconoce como la otra pata del primero.
+    """
+    from datetime import date as fecha_tipo
+
+    servicio.registrar(
+        fecha=fecha_tipo(2026, 7, 28),
+        tipo="Transferencia",
+        monto=3_519.77,
+        categoria_id=ids_catalogo["vivienda"],
+        cuenta_id=ids_catalogo["cuenta"],
+        cuenta_destino_id=ids_catalogo["tarjeta"],
+        fecha_banco=fecha_tipo(2026, 7, 28),
+    )
+
+    resultado = importacion.leer_documento(MP_TARJETA.encode())
+    pago = next(c for c in resultado.candidatos if c.origen.es_pago_tarjeta)
+
+    assert pago.estado == DUPLICADO
+    assert "otra pata" in pago.motivo
+    assert not pago.incluir
+
+
+def test_un_retiro_en_cajero_se_sugiere_como_traspaso(importacion):
+    """El dinero del cajero sigue siendo de uno: va a efectivo, no a gasto."""
+    documento = MP_CUENTA + "\n15-06-2026;Retiro en cajero;164000000001;-500.00;0.00"
+    resultado = importacion.leer_documento(documento.encode())
+    retiro = next(
+        c for c in resultado.candidatos if "cajero" in c.origen.descripcion_banco
+    )
+
+    assert retiro.origen.es_retiro_efectivo
+    assert retiro.tipo_sugerido == "Transferencia"
+
+
+def test_el_documento_ancla_sus_saldos_al_cerrar(importacion, ids_catalogo, db_path):
+    """Los saldos que declara el estado de cuenta son la verdad del banco."""
+    from finanzas.application.services.patrimonio_service import PatrimonioService
+    from finanzas.data.repositories.patrimonio_repository import PatrimonioRepository
+
+    resultado = importacion.leer_documento(MP_TARJETA.encode())
+    resultado.cuenta_id = ids_catalogo["tarjeta"]
+
+    anclados = importacion.anclar(resultado)
+    anclas = PatrimonioService(PatrimonioRepository(db_path)).anclas()
+
+    assert anclados == len(resultado.anclas) >= 1
+    assert set(anclas["cuenta"]) == {"Tarjeta crédito"}
+    # En una tarjeta, el saldo declarado es deuda: en el libro va negativo.
+    assert (anclas["saldo"] <= 0).all()
+    assert (anclas["saldo_visto"] >= 0).all()
 
 
 def test_un_candidato_sin_categoria_no_se_guarda(importacion, servicio, ids_catalogo):
@@ -511,11 +632,19 @@ def test_un_candidato_sin_categoria_no_se_guarda(importacion, servicio, ids_cata
 
 
 def _importar_uno(importacion, servicio, ids_catalogo, documento=MP_CUENTA):
-    """Importa el primer candidato de un documento y devuelve su id."""
+    """
+    Importa el primer candidato de un documento y devuelve su id.
+
+    El primero del CSV de cuenta es un retiro del apartado: un traspaso,
+    y como tal necesita destino además de origen.
+    """
     resultado = importacion.leer_documento(documento.encode())
     candidato = resultado.candidatos[0]
     candidato.categoria_id = ids_catalogo["vivienda"]
     candidato.cuenta_id = ids_catalogo["cuenta"]
+    if candidato.origen.es_traspaso:
+        candidato.cuenta_id = ids_catalogo["ahorro_cuenta"]
+        candidato.cuenta_destino_id = ids_catalogo["cuenta"]
     importacion.guardar([candidato], ids_catalogo["cuenta"], pagado=True)
 
     return int(servicio.buscar().iloc[0]["id"]), candidato
@@ -535,7 +664,8 @@ def test_la_nota_queda_para_el_usuario(importacion, servicio, ids_catalogo):
     resultado = importacion.leer_documento(MP_CUENTA.encode())
     candidato = resultado.candidatos[0]
     candidato.categoria_id = ids_catalogo["vivienda"]
-    candidato.cuenta_id = ids_catalogo["cuenta"]
+    candidato.cuenta_id = ids_catalogo["ahorro_cuenta"]
+    candidato.cuenta_destino_id = ids_catalogo["cuenta"]
     candidato.nota = "revisar con Ana"
 
     importacion.guardar([candidato], ids_catalogo["cuenta"])
@@ -580,7 +710,7 @@ def test_se_puede_buscar_por_el_texto_del_banco(importacion, servicio, ids_catal
     """Si lo que se recuerda es cómo lo escribió el banco, debe encontrarse."""
     _importar_uno(importacion, servicio, ids_catalogo)
 
-    assert len(servicio.buscar(texto="Ahorro")) == 1
+    assert len(servicio.buscar(texto="retirado")) == 1
 
 
 def test_el_folio_deduplica_sin_heuristica(importacion, servicio, ids_catalogo):
@@ -1044,3 +1174,215 @@ def test_las_correcciones_sobreviven_a_recargar(importacion, ids_catalogo):
 
     assert primero.tipo == str(TipoMovimiento.INGRESO)
     assert primero.fecha_pago == fecha_tipo(2026, 7, 21)
+
+
+# ═══════════════════════════════════════════════════════════
+# Ganancias de centavos: un total por mes
+#
+# Mercado Pago abona intereses todos los días. Veinte líneas
+# de un centavo no dicen nada por separado, así que el
+# importador las junta en un total por mes y las reconoce al
+# reimportar aunque estén dentro de ese total.
+# ═══════════════════════════════════════════════════════════
+
+MP_CUENTA_GANANCIAS = """INITIAL_BALANCE;CREDITS;DEBITS;FINAL_BALANCE
+0.00;2,212.25;0.00;2,212.25
+
+RELEASE_DATE;TRANSACTION_TYPE;REFERENCE_ID;TRANSACTION_NET_AMOUNT;PARTIAL_BALANCE
+03-06-2026;Ganancia ;1744720112053;0.13;0.13
+04-06-2026;Ganancia de Apartados Beneficio de Mercado Pago;171809646294;2.07;2.20
+04-06-2026;Transferencia recibida FERNANDO BARRIOS GOMEZ;162553887082;2,210.00;2,212.20
+05-06-2026;Ganancia Interés;1747866954993;0.01;2,212.21
+02-07-2026;Ganancia ;1747935183636;0.02;2,212.23
+03-07-2026;Ganancia Beneficio de Mercado Pago;173796873271;0.02;2,212.25"""
+
+
+def test_las_ganancias_se_juntan_en_un_total_por_mes(importacion):
+    """Tres de junio y dos de julio: dos totales, y la transferencia intacta."""
+    resultado = importacion.leer_documento(MP_CUENTA_GANANCIAS.encode())
+    totales = [c for c in resultado.candidatos if c.origen.es_total]
+    sueltos = [c for c in resultado.candidatos if not c.origen.es_total]
+
+    assert len(sueltos) == 1
+    assert "Transferencia" in sueltos[0].origen.descripcion_banco
+    assert [(c.origen.fecha.month, c.origen.agrupa) for c in totales] == [
+        (6, 3),
+        (7, 2),
+    ]
+    junio = totales[0]
+    assert junio.origen.monto == 2.21
+    assert junio.origen.fecha == date(2026, 6, 5)
+    assert junio.tipo_sugerido == "Ingreso"
+    assert junio.origen.categoria_banco == "Rendimientos"
+    assert len(junio.origen.referencias) == 3
+    # El cuadre del documento no cambia por juntar.
+    assert resultado.lectura.cuadra
+
+
+def test_un_total_de_ganancias_se_guarda_con_todos_sus_folios(
+    importacion, servicio, ids_catalogo
+):
+    resultado = importacion.leer_documento(MP_CUENTA_GANANCIAS.encode())
+    junio = next(c for c in resultado.candidatos if c.origen.es_total)
+    junio.categoria_id = ids_catalogo["sueldo"]
+    junio.cuenta_id = ids_catalogo["cuenta"]
+
+    importacion.guardar([junio], ids_catalogo["cuenta"])
+    guardado = servicio.buscar().iloc[0]
+
+    assert guardado["tipo"] == "Ingreso"
+    assert guardado["monto"] == 2.21
+    assert guardado["referencia_externa"].count(",") == 2
+
+
+def test_al_reimportar_las_ganancias_dentro_de_un_total_se_reconocen(
+    importacion, servicio, ids_catalogo
+):
+    """Cada folio ya visto es una línea registrada, esté sola o en un total."""
+    resultado = importacion.leer_documento(MP_CUENTA_GANANCIAS.encode())
+    junio = next(c for c in resultado.candidatos if c.origen.es_total)
+    junio.categoria_id = ids_catalogo["sueldo"]
+    junio.cuenta_id = ids_catalogo["cuenta"]
+    importacion.guardar([junio], ids_catalogo["cuenta"])
+
+    segunda = importacion.leer_documento(MP_CUENTA_GANANCIAS.encode())
+    por_mes = {c.origen.fecha.month: c for c in segunda.candidatos if c.origen.es_total}
+
+    assert por_mes[6].estado == DUPLICADO
+    assert "total registrado" in por_mes[6].motivo
+    assert not por_mes[6].incluir
+    # Julio no se había guardado: sigue siendo nuevo.
+    assert por_mes[7].estado == NUEVO
+
+
+def test_un_total_con_ganancias_nuevas_y_viejas_queda_en_duda(
+    importacion, servicio, ids_catalogo
+):
+    """Si un documento trae más ganancias del mismo mes, se avisa en vez de duplicar."""
+    lineas = MP_CUENTA_GANANCIAS.splitlines()
+    parcial = "\n".join(lineas[:6])  # dos ganancias de junio
+    resultado = importacion.leer_documento(parcial.encode())
+    junio = next(c for c in resultado.candidatos if c.origen.es_total)
+    junio.categoria_id = ids_catalogo["sueldo"]
+    junio.cuenta_id = ids_catalogo["cuenta"]
+    importacion.guardar([junio], ids_catalogo["cuenta"])
+
+    completa = importacion.leer_documento(MP_CUENTA_GANANCIAS.encode())
+    junio_completo = next(
+        c
+        for c in completa.candidatos
+        if c.origen.es_total and c.origen.fecha.month == 6
+    )
+
+    assert junio_completo.estado == POSIBLE
+    assert "2 de las 3" in junio_completo.motivo
+
+
+def test_una_sola_ganancia_en_el_mes_no_se_junta(importacion):
+    """Un total de una línea no es un total."""
+    lineas = MP_CUENTA_GANANCIAS.splitlines()
+    una = "\n".join(lineas[:5] + [lineas[6]])  # una ganancia y la transferencia
+    resultado = importacion.leer_documento(una.encode())
+
+    assert not any(c.origen.es_total for c in resultado.candidatos)
+    assert len(resultado.candidatos) == 2
+
+
+# ═══════════════════════════════════════════════════════════
+# La otra pata, sabiendo de qué cuenta es el documento
+#
+# Un traspaso se registra una vez con sus dos cuentas. Cuando
+# llega el estado de la otra cuenta, la misma cifra aparece
+# del otro lado y tiene que reconocerse, no duplicarse; y la
+# misma cifra en una cuenta ajena al traspaso no es él.
+# ═══════════════════════════════════════════════════════════
+
+MP_CUENTA_ENVIO = """INITIAL_BALANCE;CREDITS;DEBITS;FINAL_BALANCE
+5,000.00;0.00;-2,210.00;2,790.00
+
+RELEASE_DATE;TRANSACTION_TYPE;REFERENCE_ID;TRANSACTION_NET_AMOUNT;PARTIAL_BALANCE
+04-06-2026;Transferencia enviada Fernando Barrios;169999999999;-2,210.00;2,790.00"""
+
+
+def _traspaso_registrado(servicio, ids_catalogo) -> int:
+    """El traspaso visto primero desde la cuenta que recibió."""
+    return servicio.registrar(
+        fecha=date(2026, 6, 4),
+        tipo="Transferencia",
+        monto=2_210.0,
+        categoria_id=ids_catalogo["vivienda"],
+        cuenta_id=ids_catalogo["cuenta"],
+        cuenta_destino_id=ids_catalogo["ahorro_cuenta"],
+        fecha_banco=date(2026, 6, 4),
+    )
+
+
+def test_el_envio_visto_desde_la_cuenta_emisora_es_la_otra_pata(
+    importacion, servicio, ids_catalogo
+):
+    traspaso_id = _traspaso_registrado(servicio, ids_catalogo)
+
+    resultado = importacion.leer_documento(MP_CUENTA_ENVIO.encode())
+    resultado.cuenta_id = ids_catalogo["cuenta"]
+    importacion.contrastar(resultado)
+    (envio,) = resultado.candidatos
+
+    assert envio.estado == DUPLICADO
+    assert f"traspaso {traspaso_id}" in envio.motivo
+    assert "otra pata" in envio.motivo
+    assert not envio.incluir
+
+
+def test_la_misma_cifra_en_una_cuenta_ajena_no_es_el_traspaso(
+    importacion, servicio, ids_catalogo
+):
+    """Desde Efectivo, una salida de 2,210 no es el traspaso banco → ahorro."""
+    _traspaso_registrado(servicio, ids_catalogo)
+
+    resultado = importacion.leer_documento(MP_CUENTA_ENVIO.encode())
+    resultado.cuenta_id = ids_catalogo["efectivo"]
+    importacion.contrastar(resultado)
+    (envio,) = resultado.candidatos
+
+    assert envio.estado == NUEVO
+    assert envio.incluir
+    # Pero se avisa, por si aquél se registró con la cuenta equivocada.
+    assert "Cuenta principal" in envio.motivo
+
+
+def test_cambiar_la_cuenta_del_documento_vuelve_a_contrastar(
+    importacion, servicio, ids_catalogo
+):
+    _traspaso_registrado(servicio, ids_catalogo)
+    resultado = importacion.leer_documento(MP_CUENTA_ENVIO.encode())
+
+    resultado.cuenta_id = ids_catalogo["efectivo"]
+    importacion.contrastar(resultado)
+    assert resultado.candidatos[0].estado == NUEVO
+
+    resultado.cuenta_id = ids_catalogo["cuenta"]
+    importacion.contrastar(resultado)
+    assert resultado.candidatos[0].estado == DUPLICADO
+
+
+def test_un_abono_no_se_confunde_con_un_gasto_de_la_misma_cifra(
+    importacion, servicio, ids_catalogo
+):
+    """Un gasto de 2,210 que salió de la cuenta no es una entrada de 2,210."""
+    servicio.registrar(
+        fecha=date(2026, 6, 4),
+        tipo=TipoMovimiento.GASTO,
+        monto=2_210.0,
+        categoria_id=ids_catalogo["vivienda"],
+        cuenta_id=ids_catalogo["cuenta"],
+        fecha_banco=date(2026, 6, 4),
+    )
+    recibo = MP_CUENTA_ENVIO.replace("enviada", "recibida").replace(
+        "-2,210.00", "2,210.00"
+    )
+
+    resultado = importacion.leer_documento(recibo.encode())
+    resultado.cuenta_id = ids_catalogo["cuenta"]
+    importacion.contrastar(resultado)
+
+    assert resultado.candidatos[0].estado == NUEVO

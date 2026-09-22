@@ -57,16 +57,22 @@ class DeseosRepository:
 
     def saldos_por_cuenta(self) -> pd.DataFrame:
         """
-        Devuelve el saldo disponible en cada cuenta del balance.
+        Devuelve el saldo disponible hoy en cada cuenta de activo.
 
-        Sale de las posiciones patrimoniales ligadas a una cuenta, que es
-        donde vive el saldo: una cuenta sin posición todavía no dice
-        cuánto tiene.
+        Se deduce de los movimientos, igual que en Patrimonio: una tarjeta
+        no entra porque su saldo es deuda, y una cuenta con saldo en
+        contra tampoco, porque no hay con qué comprar.
         """
-        with connect(self._db_path) as conexion:
-            return pd.read_sql_query(
-                "SELECT * FROM v_saldos_cuentas ORDER BY saldo DESC", conexion
-            )
+        from finanzas.data.repositories.patrimonio_repository import (
+            PatrimonioRepository,
+        )
+
+        saldos = PatrimonioRepository(self._db_path).saldos_a(date.today())
+        if saldos.empty:
+            return saldos
+
+        disponibles = saldos[(saldos["lado"] == "Activo") & (saldos["saldo"] > 0)]
+        return disponibles.sort_values("saldo", ascending=False).reset_index(drop=True)
 
     def crear(self, deseo: Deseo) -> int:
         """Agrega un deseo a la lista y devuelve su id."""

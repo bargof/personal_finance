@@ -3,7 +3,6 @@ from __future__ import annotations
 import streamlit as st
 
 from finanzas.application.app.components import (
-    cargar_tablero,
     grafico_barras,
     grafico_tendencia,
     insignia_estado,
@@ -13,7 +12,7 @@ from finanzas.application.app.components import (
     selector_periodo,
     sin_datos,
     tabla_equivalente,
-    version_datos,
+    tablero_del_periodo,
 )
 from finanzas.application.app.theme import rotulo
 
@@ -22,12 +21,19 @@ from finanzas.application.app.theme import rotulo
 # ═══════════════════════════════════════════════════════════
 
 periodo = selector_periodo()
-tablero = cargar_tablero(periodo, version_datos())
+tablero = tablero_del_periodo(periodo)
 reglas = tablero.reglas
 simbolo = "$" if reglas.moneda in ("MXN", "USD") else ""
 
 st.title("Dashboard financiero")
-st.caption(f"Periodo analizado: {tablero.etiqueta} · moneda {reglas.moneda}")
+if tablero.es_historico:
+    st.caption(
+        f"Todo lo registrado · {tablero.meses} meses con datos · moneda "
+        f"{reglas.moneda}. El presupuesto se compara contra el gasto mensual "
+        "promedio; elige un mes en la barra lateral para filtrar."
+    )
+else:
+    st.caption(f"Periodo analizado: {tablero.etiqueta} · moneda {reglas.moneda}")
 
 if not tablero.hay_datos:
     sin_datos()
@@ -205,7 +211,8 @@ with izquierda:
                         "Presupuesto", format="$%.0f"
                     ),
                     "gasto_del_mes": st.column_config.NumberColumn(
-                        "Gasto", format="$%.0f"
+                        "Gasto mensual promedio" if tablero.es_historico else "Gasto",
+                        format="$%.0f",
                     ),
                     "disponible": st.column_config.NumberColumn(
                         "Disponible", format="$%.0f"
@@ -261,7 +268,11 @@ with derecha:
 rotulo("Actividad reciente")
 
 with st.container(border=True):
-    st.subheader("Últimos movimientos del periodo")
+    st.subheader(
+        "Últimos movimientos"
+        if tablero.es_historico
+        else "Últimos movimientos del periodo"
+    )
     servicios = obtener_servicios()
     ultimos = tablero.movimientos.sort_values("fecha", ascending=False).head(10)
 

@@ -117,6 +117,8 @@ def test_un_resumen_mensual_valido_pasa():
             "periodo": ["2026-07", "2026-08"],
             "ingresos": [21640.0, 18000.0],
             "gastos": [11229.0, 11362.0],
+            "aportaciones": [3575.0, 5000.0],
+            "retiros": [0.0, 1250.0],
             "ahorro_inversion": [3575.0, 3750.0],
             "disponible": [6836.0, 2888.0],
         }

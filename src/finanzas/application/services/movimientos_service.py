@@ -5,12 +5,15 @@ from datetime import date, time, timedelta
 
 import pandas as pd
 
+from finanzas.data.repositories.catalogos_repository import CatalogosRepository
 from finanzas.data.repositories.movimientos_repository import MovimientosRepository
+from finanzas.domain import captura
 from finanzas.domain.entities import Movimiento
 from finanzas.domain.enums import (
     EstadoMovimiento,
     Naturaleza,
     Necesidad,
+    TipoCuenta,
     TipoMovimiento,
 )
 
@@ -21,7 +24,20 @@ logger = logging.getLogger(__name__)
 #
 # La regla que más se rompe al capturar es el signo: aquí el
 # monto siempre entra positivo y el tipo define el efecto.
+#
+# La segunda que más se rompe es la de la tarjeta de crédito:
+# comprar con ella no deja el gasto «por pagar», lo paga la
+# tarjeta y lo que se debe es la tarjeta. Aquí se normaliza,
+# para que ninguna pantalla tenga que acordarse.
 # ═══════════════════════════════════════════════════════════
+
+#: Medio de pago que se asume cuando no se indica, según la cuenta.
+_MEDIO_POR_TIPO_DE_CUENTA: dict[str, str] = {
+    TipoCuenta.EFECTIVO: "Efectivo",
+    TipoCuenta.DEBITO: "Débito",
+    TipoCuenta.AHORRO: "Débito",
+    TipoCuenta.CREDITO: "Crédito",
+}
 
 #: Tope defensivo para un solo movimiento; atrapa ceros de más al teclear.
 MONTO_MAXIMO = 100_000_000.0
@@ -48,8 +64,15 @@ _SIN_FECHA_PAGO = _SinEspecificar()
 class MovimientosService:
     """Casos de uso sobre los movimientos del usuario."""
 
-    def __init__(self, repositorio: MovimientosRepository | None = None) -> None:
+    def __init__(
+        self,
+        repositorio: MovimientosRepository | None = None,
+        catalogos: CatalogosRepository | None = None,
+    ) -> None:
         self._repo = repositorio or MovimientosRepository()
+        # Las reglas de captura dependen del tipo de cuenta, así que el
+        # servicio necesita mirar el catálogo; apunta a la misma base.
+        self._catalogos = catalogos or CatalogosRepository(self._repo.db_path)
 
     # ── Consulta ─────────────────────────────────────────
 
@@ -87,6 +110,10 @@ class MovimientosService:
     def nombres_de_proyecto(self) -> list[str]:
         """Devuelve los proyectos ya usados, para reutilizarlos al capturar."""
         return self._repo.nombres_de_proyecto()
+
+    def empresas(self) -> list[str]:
+        """Devuelve las empresas ya usadas, de la más frecuente a la menos."""
+        return self._repo.empresas()
 
     def lugares(self) -> list[str]:
         """Devuelve los lugares ya usados, del más frecuente al menos."""
@@ -148,6 +175,7 @@ class MovimientosService:
         fecha_pago: date | None | _SinEspecificar = _SIN_FECHA_PAGO,
         descripcion_banco: str = "",
         referencia_externa: str = "",
+        empresa: str = "",
         lugar: str = "",
         hora: time | None = None,
         fecha_banco: date | None = None,
@@ -182,7 +210,7 @@ class MovimientosService:
         if fecha_banco is None and not descripcion_banco and not referencia_externa:
             fecha_banco = fecha + timedelta(days=1)
 
-        movimiento = _construir(
+        movimiento = self._preparar(
             fecha=fecha,
             tipo=tipo,
             monto=monto,
@@ -203,6 +231,7 @@ class MovimientosService:
             fecha_pago=fecha_pago,
             descripcion_banco=descripcion_banco,
             referencia_externa=referencia_externa,
+            empresa=empresa,
             lugar=lugar,
             hora=hora,
             fecha_banco=fecha_banco,
@@ -220,9 +249,11 @@ class MovimientosService:
         return movimiento_id
 
     def registrar_muchos(self, movimientos: list[Movimiento]) -> int:
-        """Registra varios movimientos ya validados en una transacción."""
+        """Registra varios movimientos en una transacción, con las mismas reglas."""
+        tipos = self._catalogos.tipos_de_cuentas()
         for movimiento in movimientos:
-            _validar(movimiento)
+            _normalizar(movimiento, tipos)
+            _validar(movimiento, tipos)
 
         return self._repo.crear_muchos(movimientos)
 
@@ -260,13 +291,24 @@ class MovimientosService:
             # banco: son dos campos con dos propósitos.
             "descripcion_banco": actual["descripcion_banco"],
             "referencia_externa": actual["referencia_externa"],
+            "empresa": actual["empresa"],
             "lugar": actual["lugar"],
             "hora": _hora_o_nulo(actual["hora"]),
             "fecha_banco": _fecha_o_nulo(actual["fecha_banco"]),
         }
         datos.update(campos)
 
-        self._repo.actualizar(movimiento_id, _construir(**datos))
+        # Cambiar de tipo o de cuenta cambia lo que tiene sentido llevar:
+        # un gasto que pasa a traspaso pierde el «ya se pagó», y uno que
+        # pasa a tarjeta queda pagado en el acto. Si quien llama no dijo
+        # nada de la fecha de pago, se deja que la regla la decida.
+        if "fecha_pago" not in campos and (
+            campos.get("tipo", datos["tipo"]) != actual["tipo"]
+            or campos.get("cuenta_id", datos["cuenta_id"]) != int(actual["cuenta_id"])
+        ):
+            datos["fecha_pago"] = datos["fecha_pago"] or datos["fecha"]
+
+        self._repo.actualizar(movimiento_id, self._preparar(**datos))
         logger.info("Movimiento %s actualizado", movimiento_id)
 
     def duplicar(self, movimiento_id: int, nueva_fecha: date) -> int:
@@ -297,6 +339,7 @@ class MovimientosService:
             etiquetas=actual["etiquetas"],
             nota=actual["nota"],
             estado=actual["estado"],
+            empresa=actual["empresa"],
             lugar=actual["lugar"],
             # La copia nace sin pagar: repetir el gasto no repite su pago.
             fecha_pago=None,
@@ -330,9 +373,62 @@ class MovimientosService:
         logger.info("Movimiento %s marcado como pagado", movimiento_id)
 
     def marcar_por_pagar(self, movimiento_id: int) -> None:
-        """Devuelve un movimiento a devengado, si se marcó pagado por error."""
+        """
+        Devuelve un gasto a devengado, si se marcó pagado por error.
+
+        Raises
+        ------
+        MovimientoInvalidoError
+            Si no es un gasto, o si se pagó con tarjeta de crédito: ahí
+            el gasto ya está pagado y lo que se debe es la tarjeta.
+        """
+        actual = self._repo.obtener(movimiento_id)
+        if actual is None:
+            raise MovimientoInvalidoError(f"No existe el movimiento {movimiento_id}.")
+
+        tipos = self._catalogos.tipos_de_cuentas()
+        tipo_cuenta = tipos.get(int(actual["cuenta_id"]))
+        if captura.pago_lo_decide_la_cuenta(actual["tipo"], tipo_cuenta):
+            raise MovimientoInvalidoError(
+                "Este movimiento no puede quedar pendiente de pago: sólo un "
+                "gasto pagado desde efectivo, débito o ahorro puede deberse. "
+                "Con tarjeta, lo que se debe es la tarjeta."
+            )
+
         self._repo.marcar_pagado(movimiento_id, None)
         logger.info("Movimiento %s devuelto a por pagar", movimiento_id)
+
+    # ── Reglas de captura ────────────────────────────────
+
+    def _preparar(self, **datos: object) -> Movimiento:
+        """
+        Arma el movimiento, lo normaliza según su tipo y cuenta, y lo valida.
+
+        Es el único camino de escritura: registrar y actualizar pasan por
+        aquí, así que las reglas viven en un solo lugar.
+        """
+        tipos = self._catalogos.tipos_de_cuentas()
+        movimiento = _construir(**datos)
+        _normalizar(movimiento, tipos)
+        _validar(movimiento, tipos)
+
+        if movimiento.tipo == TipoMovimiento.GASTO and movimiento.medio_pago_id is None:
+            movimiento.medio_pago_id = self._medio_por_defecto(
+                tipos.get(movimiento.cuenta_id)
+            )
+
+        return movimiento
+
+    def _medio_por_defecto(self, tipo_cuenta: str | None) -> int | None:
+        """El medio de pago que la cuenta implica, si existe en el catálogo."""
+        if tipo_cuenta is None:
+            return None
+
+        nombre = _MEDIO_POR_TIPO_DE_CUENTA.get(tipo_cuenta)
+        if nombre is None:
+            return None
+
+        return self._catalogos.medio_pago_llamado(nombre)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -363,18 +459,49 @@ def _construir(**datos: object) -> Movimiento:
         fecha_pago=datos.get("fecha_pago"),  # type: ignore[arg-type]
         descripcion_banco=str(datos.get("descripcion_banco") or ""),
         referencia_externa=str(datos.get("referencia_externa") or ""),
+        empresa=str(datos.get("empresa") or ""),
         lugar=str(datos.get("lugar") or ""),
         hora=_hora_o_nulo(datos.get("hora")),
         fecha_banco=_fecha_o_nulo(datos.get("fecha_banco")),
     )
-    _validar(movimiento)
 
     return movimiento
 
 
-def _validar(movimiento: Movimiento) -> None:
+def _normalizar(movimiento: Movimiento, tipos: dict[int, str]) -> None:
     """
-    Comprueba las reglas mínimas de un movimiento.
+    Deja el movimiento como su tipo y su cuenta mandan.
+
+    - Sólo un gasto lleva necesidad, naturaleza, recurrente, planeado,
+      empresa, lugar, hora y medio de pago; en lo demás vuelven a su valor
+      neutro para que ningún reporte los cuente.
+    - Un ingreso, un ahorro o un traspaso ocurren o no ocurren: quedan
+      pagados en su fecha.
+    - Un gasto con tarjeta de crédito lo paga la tarjeta en el acto.
+    """
+    if movimiento.tipo != TipoMovimiento.GASTO:
+        movimiento.necesidad = Necesidad.ESENCIAL
+        movimiento.naturaleza = Naturaleza.VARIABLE
+        movimiento.recurrente = False
+        movimiento.planeado = True
+        movimiento.medio_pago_id = None
+        movimiento.empresa = ""
+        movimiento.lugar = ""
+        movimiento.hora = None
+
+    if not captura.con_destino(movimiento.tipo):
+        movimiento.cuenta_destino_id = None
+
+    tipo_cuenta = tipos.get(movimiento.cuenta_id)
+    if captura.pago_lo_decide_la_cuenta(movimiento.tipo, tipo_cuenta):
+        movimiento.fecha_pago = movimiento.fecha_pago or movimiento.fecha
+        if movimiento.tipo != TipoMovimiento.GASTO:
+            movimiento.fecha_pago = movimiento.fecha
+
+
+def _validar(movimiento: Movimiento, tipos: dict[int, str]) -> None:
+    """
+    Comprueba las reglas de un movimiento ya normalizado.
 
     Raises
     ------
@@ -399,17 +526,44 @@ def _validar(movimiento: Movimiento) -> None:
     if not movimiento.cuenta_id:
         raise MovimientoInvalidoError("Selecciona una cuenta.")
 
-    if movimiento.cuenta_destino_id is not None:
-        if movimiento.tipo != TipoMovimiento.TRANSFERENCIA:
+    if movimiento.cuenta_id not in tipos:
+        raise MovimientoInvalidoError("La cuenta elegida no existe.")
+
+    if not captura.con_destino(movimiento.tipo):
+        return
+
+    # Lo que mueve dinero entre cuentas propias necesita las dos: sin
+    # destino, el libro de una cuenta pierde dinero que no se fue a
+    # ningún lado.
+    if movimiento.cuenta_destino_id is None:
+        if movimiento.tipo == TipoMovimiento.TRANSFERENCIA:
             raise MovimientoInvalidoError(
-                "La cuenta destino sólo aplica a una transferencia: es a "
-                "dónde llega el dinero que sale de la cuenta de origen."
+                "Un traspaso necesita cuenta de destino. Si el dinero fue a "
+                "alguien más, no es un traspaso: regístralo como gasto."
             )
-        if movimiento.cuenta_destino_id == movimiento.cuenta_id:
-            raise MovimientoInvalidoError(
-                "El origen y el destino de una transferencia no pueden ser "
-                "la misma cuenta."
-            )
+        raise MovimientoInvalidoError(
+            "Elige la cuenta de ahorro o inversión a la que entra el dinero. "
+            "Si no existe, da de alta un apartado en Catálogos."
+        )
+
+    if movimiento.cuenta_destino_id == movimiento.cuenta_id:
+        raise MovimientoInvalidoError(
+            "El origen y el destino no pueden ser la misma cuenta."
+        )
+
+    tipo_destino = tipos.get(movimiento.cuenta_destino_id)
+    if tipo_destino is None:
+        raise MovimientoInvalidoError("La cuenta de destino no existe.")
+
+    if (
+        movimiento.tipo in (TipoMovimiento.AHORRO, TipoMovimiento.INVERSION)
+        and not TipoCuenta(tipo_destino).guarda_ahorro
+    ):
+        raise MovimientoInvalidoError(
+            "El destino de un ahorro o una inversión tiene que ser una cuenta "
+            "de tipo Ahorro o Inversión. Si sólo mueves dinero entre cuentas, "
+            "usa Transferencia."
+        )
 
 
 def _hora_o_nulo(valor: object) -> time | None:

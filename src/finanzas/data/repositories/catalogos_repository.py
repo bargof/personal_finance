@@ -164,6 +164,18 @@ class CatalogosRepository:
                 conexion,
             )
 
+    def tipos_de_cuentas(self) -> dict[int, str]:
+        """
+        Devuelve {id: tipo} de todas las cuentas, activas o no.
+
+        Es lo que las reglas de captura necesitan para saber si una cuenta
+        es de crédito, de ahorro o de caja sin cargar el catálogo entero.
+        """
+        with connect(self._db_path) as conexion:
+            filas = conexion.execute("SELECT id, tipo FROM cuentas").fetchall()
+
+        return {int(fila["id"]): fila["tipo"] for fila in filas}
+
     def crear_cuenta(self, nombre: str, tipo: str, institucion: str = "") -> int:
         """Da de alta una cuenta y devuelve su id."""
         with connect(self._db_path) as conexion:
@@ -216,6 +228,16 @@ class CatalogosRepository:
             conexion.execute("DELETE FROM cuentas WHERE id = ?", (cuenta_id,))
 
     # ── Medios de pago ───────────────────────────────────
+
+    def medio_pago_llamado(self, nombre: str) -> int | None:
+        """Devuelve el id del medio de pago con ese nombre, si existe y está activo."""
+        with connect(self._db_path) as conexion:
+            fila = conexion.execute(
+                "SELECT id FROM medios_pago WHERE nombre = ? AND activo = 1",
+                (nombre,),
+            ).fetchone()
+
+        return int(fila["id"]) if fila is not None else None
 
     def listar_medios_pago(self, solo_activos: bool = True) -> pd.DataFrame:
         """Devuelve los medios de pago registrados."""

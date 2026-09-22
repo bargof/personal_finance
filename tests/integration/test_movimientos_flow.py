@@ -323,3 +323,150 @@ def test_eliminar_una_subcategoria_no_borra_sus_movimientos(
     assert sobreviviente is not None
     assert sobreviviente["subcategoria"] == ""
     assert sobreviviente["monto"] == 6500.0
+
+
+# ═══════════════════════════════════════════════════════════
+# Reglas por tipo de movimiento
+#
+# Un ingreso no es esencial ni deseo, un ahorro entra a una
+# cuenta de ahorro, y el ahorro del mes es neto.
+# ═══════════════════════════════════════════════════════════
+
+
+def test_un_ingreso_no_conserva_banderas_de_gasto(servicio, ids_catalogo):
+    """Lo que no aplica se guarda neutro, para que ningún reporte lo cuente."""
+    from finanzas.domain.enums import Necesidad
+
+    ingreso_id = servicio.registrar(
+        fecha=date(2026, 8, 1),
+        tipo=TipoMovimiento.INGRESO,
+        monto=20_000.0,
+        categoria_id=ids_catalogo["sueldo"],
+        cuenta_id=ids_catalogo["cuenta"],
+        necesidad=Necesidad.DESEO,
+        recurrente=True,
+        planeado=False,
+        empresa="ITAM",
+        lugar="Oficina",
+        fecha_pago=None,
+    )
+    fila = servicio.obtener(ingreso_id)
+
+    assert fila["necesidad"] == "Esencial"
+    assert not fila["recurrente"]
+    assert fila["planeado"]
+    assert fila["empresa"] == ""
+    assert fila["lugar"] == ""
+    # Un ingreso ocurre o no ocurre: queda pagado en su fecha.
+    assert fila["pagado"]
+
+
+def test_un_ahorro_necesita_una_cuenta_de_ahorro(servicio, ids_catalogo):
+    """Sin destino no hay a dónde sumar el ahorro."""
+    from finanzas.application.services.movimientos_service import (
+        MovimientoInvalidoError,
+    )
+
+    with pytest.raises(MovimientoInvalidoError, match="ahorro"):
+        servicio.registrar(
+            fecha=date(2026, 8, 1),
+            tipo=TipoMovimiento.AHORRO,
+            monto=1_000.0,
+            categoria_id=ids_catalogo["ahorro"],
+            cuenta_id=ids_catalogo["cuenta"],
+        )
+
+    with pytest.raises(MovimientoInvalidoError, match="Ahorro o Inversión"):
+        servicio.registrar(
+            fecha=date(2026, 8, 1),
+            tipo=TipoMovimiento.AHORRO,
+            monto=1_000.0,
+            categoria_id=ids_catalogo["ahorro"],
+            cuenta_id=ids_catalogo["cuenta"],
+            cuenta_destino_id=ids_catalogo["efectivo"],
+        )
+
+
+def test_el_ahorro_del_mes_es_neto(servicio, ids_catalogo):
+    """Meter 7,000 y sacar 3,000 es haber ahorrado 4,000, no 7,000."""
+    servicio.registrar(
+        fecha=date(2026, 8, 1),
+        tipo=TipoMovimiento.AHORRO,
+        monto=7_000.0,
+        categoria_id=ids_catalogo["ahorro"],
+        cuenta_id=ids_catalogo["cuenta"],
+        cuenta_destino_id=ids_catalogo["ahorro_cuenta"],
+    )
+    servicio.registrar(
+        fecha=date(2026, 8, 20),
+        tipo=TipoMovimiento.TRANSFERENCIA,
+        monto=3_000.0,
+        categoria_id=ids_catalogo["ahorro"],
+        cuenta_id=ids_catalogo["ahorro_cuenta"],
+        cuenta_destino_id=ids_catalogo["cuenta"],
+    )
+
+    resumen = servicio.resumen_mensual().set_index("periodo").loc["2026-08"]
+    flujo = servicio.flujo_por_cuenta().set_index("cuenta")
+
+    assert resumen["aportaciones"] == 7_000.0
+    assert resumen["retiros"] == 3_000.0
+    assert resumen["ahorro_inversion"] == 4_000.0
+    # Y las dos cuentas cuadran: lo que salió de una entró a la otra.
+    assert flujo.loc["Cuenta ahorro", "flujo_neto"] == 4_000.0
+    assert flujo.loc["Cuenta principal", "flujo_neto"] == -4_000.0
+
+
+def test_un_traspaso_al_apartado_tambien_es_ahorro(servicio, ids_catalogo):
+    """Lo dicen las cuentas, no el tipo: así aportación y retiro se miden igual."""
+    servicio.registrar(
+        fecha=date(2026, 8, 1),
+        tipo=TipoMovimiento.TRANSFERENCIA,
+        monto=500.0,
+        categoria_id=ids_catalogo["ahorro"],
+        cuenta_id=ids_catalogo["cuenta"],
+        cuenta_destino_id=ids_catalogo["ahorro_cuenta"],
+    )
+
+    fila = servicio.buscar().iloc[0]
+
+    assert fila["patrimonio_creado"] == 500.0
+    assert fila["ahorro_retirado"] == 0.0
+
+
+def test_el_medio_de_pago_se_deduce_de_la_cuenta(servicio, ids_catalogo):
+    """Pagar con la tarjeta es pagar a crédito, sin tener que decirlo."""
+    gasto_id = servicio.registrar(
+        fecha=date(2026, 8, 1),
+        tipo=TipoMovimiento.GASTO,
+        monto=100.0,
+        categoria_id=ids_catalogo["restaurantes"],
+        cuenta_id=ids_catalogo["tarjeta"],
+    )
+
+    assert servicio.obtener(gasto_id)["medio_pago"] == "Crédito"
+
+
+def test_cambiar_un_gasto_a_traspaso_lo_deja_pagado(servicio, ids_catalogo):
+    """El caso del pago de tarjeta capturado como gasto y corregido después."""
+    gasto_id = servicio.registrar(
+        fecha=date(2026, 8, 29),
+        tipo=TipoMovimiento.GASTO,
+        monto=6_784.48,
+        categoria_id=ids_catalogo["restaurantes"],
+        cuenta_id=ids_catalogo["cuenta"],
+        fecha_pago=None,
+    )
+    assert servicio.total_por_pagar() == 6_784.48
+
+    servicio.actualizar(
+        gasto_id,
+        tipo=TipoMovimiento.TRANSFERENCIA,
+        cuenta_destino_id=ids_catalogo["tarjeta"],
+    )
+    fila = servicio.obtener(gasto_id)
+
+    assert servicio.total_por_pagar() == 0.0
+    assert fila["pagado"]
+    assert fila["gasto_real"] == 0.0
+    assert fila["cuenta_destino"] == "Tarjeta crédito"

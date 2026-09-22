@@ -6,7 +6,10 @@ from finanzas.data.lectores.base import (
     MovimientoImportado,
     ResultadoLectura,
     anio_del_periodo,
+    es_apartado,
     es_negativo,
+    es_rendimiento,
+    es_retiro,
     parsear_fecha_larga,
     parsear_monto,
 )
@@ -149,6 +152,9 @@ class LectorNuClasico:
                     es_cargo=not es_negativo(importe),
                     categoria_banco=categoria,
                     es_pago_tarjeta=_es_pago(descripcion) or _es_pago(categoria),
+                    es_retiro_efectivo=es_retiro(descripcion),
+                    es_apartado=es_apartado(descripcion),
+                    es_rendimiento=es_rendimiento(descripcion),
                     linea=linea.strip(),
                     pagina=numero,
                 )
@@ -254,6 +260,9 @@ class LectorNuRegulado:
                     descripcion_banco=descripcion,
                     es_cargo=not importe.strip().startswith("-"),
                     es_pago_tarjeta=_es_pago(descripcion),
+                    es_retiro_efectivo=es_retiro(descripcion),
+                    es_apartado=es_apartado(descripcion),
+                    es_rendimiento=es_rendimiento(descripcion),
                     linea=linea.strip(),
                     pagina=numero,
                 )

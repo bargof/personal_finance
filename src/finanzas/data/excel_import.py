@@ -50,7 +50,6 @@ class ResultadoImportacion:
     patrimonio: int = 0
     suscripciones: int = 0
     metas: int = 0
-    cierres: int = 0
     presupuesto: int = 0
     catalogos_creados: int = 0
     omitidos: list[str] = field(default_factory=list)
@@ -63,7 +62,6 @@ class ResultadoImportacion:
             + self.patrimonio
             + self.suscripciones
             + self.metas
-            + self.cierres
             + self.presupuesto
         )
 
@@ -74,7 +72,6 @@ class ResultadoImportacion:
             f"{self.patrimonio} posiciones",
             f"{self.suscripciones} suscripciones",
             f"{self.metas} metas",
-            f"{self.cierres} cierres",
             f"{self.presupuesto} líneas de presupuesto",
         ]
         texto = ", ".join(partes)
@@ -123,7 +120,6 @@ def importar_excel(
     _importar_patrimonio(hojas, db_path, incluir_ejemplos, resultado)
     _importar_suscripciones(hojas, db_path, incluir_ejemplos, resultado)
     _importar_metas(hojas, db_path, incluir_ejemplos, resultado)
-    _importar_cierres(hojas, db_path, incluir_ejemplos, resultado)
     _importar_presupuesto(hojas, db_path, resultado)
     _importar_configuracion(hojas, db_path)
 
@@ -369,63 +365,6 @@ def _importar_metas(
         )
 
     resultado.metas = len(registros)
-
-
-def _importar_cierres(
-    hojas: dict[str, pd.DataFrame],
-    db_path: str | None,
-    incluir_ejemplos: bool,
-    resultado: ResultadoImportacion,
-) -> None:
-    """Importa la hoja «Cierres mensuales»."""
-    df = _hoja(hojas, "Cierres mensuales", incluir_ejemplos)
-    if df is None:
-        return
-
-    df = df[df["Mes"].notna()]
-    if df.empty:
-        return
-
-    registros = []
-    for _, fila in df.iterrows():
-        mes = _fecha(fila.get("Mes"))
-        if mes is None:
-            continue
-
-        registros.append(
-            (
-                mes.strftime("%Y-%m"),
-                _numero(fila.get("Efectivo / bancos")),
-                _numero(fila.get("Ahorro")),
-                _numero(fila.get("Inversiones")),
-                _numero(fila.get("Otros activos")),
-                _numero(fila.get("Deudas")),
-                _texto(fila.get("Notas")),
-            )
-        )
-
-    if not registros:
-        return
-
-    with connect(db_path) as conexion:
-        conexion.executemany(
-            """
-            INSERT INTO cierres_mensuales (
-                periodo, efectivo, ahorro, inversiones, otros_activos,
-                deudas, notas
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(periodo) DO UPDATE SET
-                efectivo      = excluded.efectivo,
-                ahorro        = excluded.ahorro,
-                inversiones   = excluded.inversiones,
-                otros_activos = excluded.otros_activos,
-                deudas        = excluded.deudas,
-                notas         = excluded.notas
-            """,
-            registros,
-        )
-
-    resultado.cierres = len(registros)
 
 
 def _importar_presupuesto(
