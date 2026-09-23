@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import date
 
 import pytest
@@ -11,6 +12,7 @@ from finanzas.application.services.importacion_service import (
     ImportacionService,
 )
 from finanzas.data.lectores import DocumentoNoReconocidoError, detectar, leer
+from finanzas.data.lectores.extraccion import Fila, Palabra
 from finanzas.data.repositories.movimientos_repository import MovimientosRepository
 from finanzas.domain.enums import TipoMovimiento
 
@@ -70,6 +72,65 @@ RELEASE_DATE;TRANSACTION_TYPE;REFERENCE_ID;TRANSACTION_NET_AMOUNT;PARTIAL_BALANC
 13-06-2026;Monto apartado Ahorro;163143637963;-5,951.50;0.00"""
 
 
+# BBVA no escribe el signo del importe: lo dice la columna en que cae, así
+# que esta muestra conserva la posición de cada dato y no sólo su texto.
+# Va completa a propósito, con el salto de página que el banco mete entre
+# los movimientos y las dos formas de «PAGO CUENTA DE TERCERO».
+BBVA_CUENTA = """Periodo DEL 07/08/2026 AL 06/09/2026
+Fecha de Corte 06/09/2026
+No. de Cuenta 1520012129
+Saldo Promedio 3,530.94 Saldo Anterior 7.50
+Saldo Promedio Gravable 0.00 Saldo Final 1,222.14
+Total Comisiones 0.00
+Intereses a Favor (+) 0.00
+Detalle de Movimientos Realizados
+ FECHA                                                             SALDO
+OPER   LIQ    DESCRIPCION               REFERENCIA CARGOS  ABONOS  OPERACION LIQUIDACION
+08/AGO 10/AGO PAGO CUENTA DE TERCERO                       420.00     427.50        7.50
+              BNET 1560063240 Jp        Referencia 0029789245
+10/AGO 10/AGO SPEI ENVIADO Mercado Pago            427.50
+              3107260JP V               Referencia 0079724199 722
+              00722969010664871550
+              MBAN01002608100079724199
+              Fernando Barrios
+BBVA MEXICO, S.A., INSTITUCION DE BANCA MULTIPLE, GRUPO FINANCIERO BBVA
+                                                        Estado de Cuenta
+                                                        PAGINA 3 / 8
+                                                        No. de Cuenta 1520012129
+10/AGO 10/AGO SPEI RECIBIDOBANORTE                         200.00
+              0260810Lunch              Referencia 0127890363 072
+              MARICELA GOMEZ VELAZQUEZ
+10/AGO 10/AGO PAGO CUENTA DE TERCERO               200.00
+              BNET 1536467839 Transf a Camila Co Referencia 0022156515
+14/AGO 14/AGO PAGO DE NOMINA                             4,222.14   4,222.14    4,222.14
+              INSTITUTO TECNOLOGICO AUTONOMO DE MEX Referencia BC 4201118692
+30/AGO 31/AGO RETIRO SIN TARJETA                 3,000.00                       1,222.14
+                                        Referencia ******0336
+Total de Movimientos
+TOTAL IMPORTE CARGOS 3,627.50 TOTAL MOVIMIENTOS CARGOS 3
+TOTAL IMPORTE ABONOS 4,842.14 TOTAL MOVIMIENTOS ABONOS 3"""
+
+
+def _con_columnas(documento: str) -> list[str]:
+    """
+    Convierte la muestra alineada en filas con posición, como el PDF.
+
+    La columna del carácter hace de posición. Es lo que el extractor saca
+    del documento y lo único con lo que se puede saber si un importe cayó
+    en CARGOS o en ABONOS, que en BBVA es toda la diferencia.
+    """
+    ancho = 6.0
+    return [
+        Fila(
+            [
+                Palabra(p.group(), p.start() * ancho, p.end() * ancho)
+                for p in re.finditer(r"\S+", linea)
+            ]
+        )
+        for linea in documento.splitlines()
+    ]
+
+
 # ═══════════════════════════════════════════════════════════
 # Detección
 # ═══════════════════════════════════════════════════════════
@@ -82,6 +143,7 @@ RELEASE_DATE;TRANSACTION_TYPE;REFERENCE_ID;TRANSACTION_NET_AMOUNT;PARTIAL_BALANC
         (NU_REGULADO, "Nu (formato regulado)"),
         (MP_TARJETA, "Mercado Pago (tarjeta)"),
         (MP_CUENTA, "Mercado Pago (cuenta)"),
+        (BBVA_CUENTA, "BBVA (cuenta)"),
     ],
 )
 def test_cada_documento_va_a_su_lector(documento, esperado):
@@ -337,6 +399,153 @@ def test_mp_cuenta_usa_el_signo_del_importe():
 
     assert por_monto[5_951.50].es_cargo
     assert not por_monto[2_210.00].es_cargo
+
+
+# ═══════════════════════════════════════════════════════════
+# BBVA, cuenta de débito
+# ═══════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def bbva():
+    """Lo leído de la muestra de BBVA, con las columnas a la vista."""
+    return leer(_con_columnas(BBVA_CUENTA))
+
+
+def _con_concepto(lectura, texto: str) -> list:
+    """Los movimientos cuya descripción empieza por ese concepto."""
+    return [m for m in lectura.movimientos if m.descripcion_banco.startswith(texto)]
+
+
+def test_bbva_distingue_cargo_de_abono_por_la_columna(bbva):
+    """
+    El mismo concepto sirve para las dos direcciones del dinero.
+
+    «PAGO CUENTA DE TERCERO» es lo que BBVA escribe tanto cuando entra
+    como cuando sale, y lo único que los separa es en qué columna puso el
+    importe. Leerlo por el texto convertiría un ingreso en gasto.
+    """
+    entra, sale = _con_concepto(bbva, "PAGO CUENTA DE TERCERO")
+
+    assert (entra.monto, entra.es_cargo) == (420.00, False)
+    assert (sale.monto, sale.es_cargo) == (200.00, True)
+
+
+def test_bbva_guarda_las_dos_fechas(bbva):
+    """El retiro se opera el 30 y el banco lo liquida el 31."""
+    retiro = _con_concepto(bbva, "RETIRO SIN TARJETA")[0]
+
+    assert retiro.fecha == date(2026, 8, 30)
+    assert retiro.fecha_cargo == date(2026, 8, 31)
+    assert retiro.es_retiro_efectivo
+
+
+def test_bbva_junta_el_detalle_y_tira_las_claves_de_rastreo(bbva):
+    """
+    El movimiento ocupa cinco renglones y sólo dos dicen algo.
+
+    La CLABE y la clave de rastreo no le dicen nada a quien revisa; el
+    nombre del otro extremo, sí.
+    """
+    envio = _con_concepto(bbva, "SPEI ENVIADO")[0]
+
+    assert envio.descripcion_banco == (
+        "SPEI ENVIADO Mercado Pago · 3107260JP V Fernando Barrios"
+    )
+
+
+def test_bbva_no_se_traga_el_pie_de_pagina(bbva):
+    """
+    Entre un movimiento y el siguiente cabe un cambio de hoja.
+
+    El pie y el encabezado de la hoja nueva caen en medio del detalle del
+    último movimiento, y se distinguen porque están fuera de la columna
+    de la descripción.
+    """
+    envio = _con_concepto(bbva, "SPEI ENVIADO")[0]
+
+    assert "PAGINA" not in envio.descripcion_banco
+    assert len(bbva.movimientos) == 6
+
+
+def test_bbva_separa_lo_que_el_documento_pega(bbva):
+    """«SPEI RECIBIDOBANORTE» sale así del PDF y así no se reconoce."""
+    assert _con_concepto(bbva, "SPEI RECIBIDO BANORTE")
+
+
+def test_bbva_solo_guarda_los_folios_que_identifican(bbva):
+    """
+    Un folio que no es del movimiento es peor que ninguno.
+
+    En la nómina la referencia empieza por «BC», que no es folio, y el
+    retiro trae la tarjeta enmascarada, que es la misma en todos: con
+    cualquiera de las dos, el siguiente movimiento igual parecería uno ya
+    registrado.
+    """
+    assert _con_concepto(bbva, "SPEI ENVIADO")[0].referencia == "0079724199"
+    assert _con_concepto(bbva, "PAGO DE NOMINA")[0].referencia == ""
+    assert _con_concepto(bbva, "RETIRO SIN TARJETA")[0].referencia == ""
+
+
+def test_bbva_suelta_el_folio_que_el_documento_repite():
+    """
+    Dos movimientos con el mismo folio prueban que ese número no es folio.
+    """
+    documento = BBVA_CUENTA.replace("Referencia 0022156515", "Referencia 0029789245")
+    lectura = leer(_con_columnas(documento))
+
+    assert [m.referencia for m in _con_concepto(lectura, "PAGO CUENTA")] == ["", ""]
+    assert _con_concepto(lectura, "SPEI ENVIADO")[0].referencia == "0079724199"
+
+
+def test_bbva_reconoce_el_traspaso_a_la_cuenta_propia(bbva):
+    """
+    El nombre del otro extremo dice si el dinero salió de verdad.
+
+    La transferencia a la cuenta propia de Mercado Pago no es gasto; la
+    que manda alguien más sí es ingreso.
+    """
+    assert _con_concepto(bbva, "SPEI ENVIADO")[0].es_traspaso_propio
+    assert not _con_concepto(bbva, "SPEI RECIBIDO BANORTE")[0].es_traspaso_propio
+
+
+def test_bbva_cuadra_contra_los_totales_del_documento(bbva):
+    """El documento declara saldos y totales, y lo leído los reconstruye."""
+    assert (bbva.periodo_inicio, bbva.periodo_fin) == (
+        date(2026, 8, 7),
+        date(2026, 9, 6),
+    )
+    assert (bbva.saldo_inicial, bbva.saldo_final) == (7.50, 1_222.14)
+    assert (bbva.total_cargos, bbva.total_abonos) == (3_627.50, 4_842.14)
+    assert bbva.cuadra is True
+    assert bbva.avisos == []
+
+
+def test_bbva_contrasta_tambien_cuantos_movimientos_declara():
+    """
+    Dos filas perdidas que se compensan cuadran por importe.
+
+    El conteo no se deja engañar, y este documento lo trae.
+    """
+    documento = BBVA_CUENTA.replace(
+        "TOTAL MOVIMIENTOS ABONOS 3", "TOTAL MOVIMIENTOS ABONOS 4"
+    )
+    lectura = leer(_con_columnas(documento))
+
+    assert any("declara 4 abonos y leí 3" in aviso for aviso in lectura.avisos)
+
+
+def test_bbva_sin_columnas_deduce_el_signo_y_lo_avisa():
+    """
+    Pegado como texto plano ya no se ve la columna, sólo el concepto.
+
+    Se lee igual —vale más que no leer nada—, pero el signo pasa a ser
+    una conjetura: se avisa, y el cuadre contra los totales lo delata.
+    """
+    lectura = leer(BBVA_CUENTA.splitlines())
+
+    assert any("deduje" in aviso for aviso in lectura.avisos)
+    assert lectura.cuadra is False
 
 
 # ═══════════════════════════════════════════════════════════

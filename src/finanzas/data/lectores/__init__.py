@@ -7,6 +7,7 @@ from finanzas.data.lectores.base import (
     MovimientoImportado,
     ResultadoLectura,
 )
+from finanzas.data.lectores.bbva import LectorBBVACuenta
 from finanzas.data.lectores.mercadopago import (
     LectorMercadoPagoCuenta,
     LectorMercadoPagoTarjeta,
@@ -21,13 +22,18 @@ logger = logging.getLogger(__name__)
 # El orden importa: el primero que reconozca el documento se
 # lo queda, así que los formatos más específicos van antes.
 # Nu regulado va delante del clásico porque ambos dicen «Nu» y
-# sólo el nuevo tiene su tabla característica.
+# sólo el nuevo tiene su tabla característica. BBVA va delante
+# de la tarjeta de Mercado Pago porque sus estados nombran a
+# Mercado Pago en cada transferencia, y el lector de la tarjeta
+# —que se conforma con ver «Mercado», «Pago» y «movimientos»—
+# se los quedaría.
 # ═══════════════════════════════════════════════════════════
 
 REGISTRO: tuple[LectorBanco, ...] = (
     LectorMercadoPagoCuenta(),
     LectorNuRegulado(),
     LectorNuClasico(),
+    LectorBBVACuenta(),
     LectorMercadoPagoTarjeta(),
 )
 
@@ -65,6 +71,7 @@ def leer(lineas: list[str]) -> ResultadoLectura:
 __all__ = [
     "REGISTRO",
     "DocumentoNoReconocidoError",
+    "LectorBBVACuenta",
     "LectorBanco",
     "MovimientoImportado",
     "ResultadoLectura",

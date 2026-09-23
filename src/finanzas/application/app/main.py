@@ -146,12 +146,21 @@ Hecho
    otra pregunta —si el movimiento ocurrió o es una proyección—, y las
    dos son independientes.
 
-5. Lector de estados de cuenta. Cuatro formatos en `data/lectores`: los
+5. Lector de estados de cuenta. Cinco formatos en `data/lectores`: los
    dos de Nu —el viejo con categoría, el nuevo con doble fecha—, la
-   tarjeta de Mercado Pago en PDF y su cuenta en CSV. La extracción va
-   por coordenadas y el parser trabaja sobre líneas, así que se puede
-   probar sin arrastrar el PDF. El cuadre contra los totales del propio
-   documento avisa si se perdió una fila.
+   tarjeta de Mercado Pago en PDF, su cuenta en CSV y la cuenta de BBVA.
+   La extracción va por coordenadas y el parser trabaja sobre líneas, así
+   que se puede probar sin arrastrar el PDF. El cuadre contra los totales
+   del propio documento avisa si se perdió una fila.
+
+5b. Columnas en el lector. BBVA no escribe el signo del importe: lo dice
+   la columna en que cae, y el mismo concepto —«PAGO CUENTA DE TERCERO»—
+   sirve para lo que entra y para lo que sale. Por eso la línea que sale
+   de la extracción (`Fila`) es un `str` que además trae la posición de
+   cada palabra: los demás lectores la usan como texto y no se enteran.
+   Ese estado trae más que los otros —dos fechas, folio, saldos y el
+   conteo de movimientos—, así que además del cuadre por importe se
+   contrasta cuántos cargos y abonos declara.
 
 6. Proyectos y lista de deseos. El proyecto agrupa gasto ya hecho y le
    pone tope; el deseo mide lo que falta contra el saldo de las cuentas

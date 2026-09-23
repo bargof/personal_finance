@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 import pdfplumber
@@ -23,6 +24,35 @@ logger = logging.getLogger(__name__)
 #: misma fila. Tres puntos cubren el desalineado de las fuentes sin unir
 #: renglones contiguos.
 _TOLERANCIA_FILA = 3.0
+
+
+@dataclass(frozen=True, slots=True)
+class Palabra:
+    """Una palabra del documento y el tramo horizontal que ocupa."""
+
+    texto: str
+    x0: float
+    x1: float
+
+
+class Fila(str):
+    """
+    Una fila del documento: su texto, con la posición de cada palabra.
+
+    Es un `str` a propósito. Los lectores trabajan sobre texto y no tienen
+    por qué enterarse de nada más, pero hay tablas —la de BBVA— donde el
+    signo del importe no está escrito: lo dice la columna en que cae. Sin
+    saber dónde cae cada número no se distingue un cargo de un abono, así
+    que la posición viaja colgada de la línea para el que la necesite.
+    """
+
+    palabras: tuple[Palabra, ...]
+
+    def __new__(cls, palabras: list[Palabra]) -> Fila:
+        """Construye la fila con el texto que forman sus palabras."""
+        fila = super().__new__(cls, " ".join(p.texto for p in palabras))
+        fila.palabras = tuple(palabras)
+        return fila
 
 
 class PdfProtegidoError(ValueError):
@@ -110,6 +140,11 @@ def _filas_de(pagina) -> list[str]:
             filas.append([palabra])
 
     return [
-        " ".join(p["text"] for p in sorted(fila, key=lambda p: p["x0"]))
+        Fila(
+            [
+                Palabra(p["text"], p["x0"], p["x1"])
+                for p in sorted(fila, key=lambda p: p["x0"])
+            ]
+        )
         for fila in filas
     ]
