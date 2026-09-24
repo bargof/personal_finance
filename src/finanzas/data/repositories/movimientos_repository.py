@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 
@@ -68,6 +68,8 @@ class MovimientosRepository:
         limite: int | None = None,
         solo_por_pagar: bool = False,
         proyectos: list[str] | None = None,
+        monto_min: float | None = None,
+        monto_max: float | None = None,
     ) -> pd.DataFrame:
         """
         Devuelve movimientos enriquecidos, filtrados por los criterios dados.
@@ -77,7 +79,10 @@ class MovimientosRepository:
         desde, hasta : date, optional
             Rango de fechas inclusivo.
         tipos, categorias, cuentas : list of str, optional
-            Filtros por valor del catálogo. Una lista vacía no filtra.
+            Filtros por valor del catálogo. Una lista vacía no filtra. La
+            cuenta cuenta por los dos lados: un traspaso aparece tanto
+            filtrando por la cuenta de la que salió como por aquella a la
+            que llegó.
         estado : str, optional
             'Confirmado' o 'Pendiente'.
         texto : str, optional
@@ -88,6 +93,9 @@ class MovimientosRepository:
             Si es True, deja sólo lo devengado que aún no se ha pagado.
         proyectos : list of str, optional
             Proyectos a incluir. Una lista vacía no filtra.
+        monto_min, monto_max : float, optional
+            Rango de importe inclusivo, en positivo como se captura. Poner
+            la misma cifra en los dos busca esa cantidad exacta.
 
         Returns
         -------
@@ -108,6 +116,15 @@ class MovimientosRepository:
             parametros.append(estado)
         if solo_por_pagar:
             condiciones.append("por_pagar > 0")
+        # Medio centavo de holgura a cada lado: el importe se guarda como
+        # REAL y, sin ella, buscar una cantidad exacta —la misma cifra
+        # arriba y abajo— dependería de cómo cayó el redondeo.
+        if monto_min is not None:
+            condiciones.append("monto >= ?")
+            parametros.append(float(monto_min) - 0.005)
+        if monto_max is not None:
+            condiciones.append("monto <= ?")
+            parametros.append(float(monto_max) + 0.005)
         if texto:
             condiciones.append(
                 "(descripcion LIKE ? OR etiquetas LIKE ? OR nota LIKE ? "
@@ -120,13 +137,24 @@ class MovimientosRepository:
         for columna, valores in (
             ("tipo", tipos),
             ("categoria", categorias),
-            ("cuenta", cuentas),
             ("proyecto", proyectos),
         ):
             if valores:
                 marcadores = ", ".join("?" for _ in valores)
                 condiciones.append(f"{columna} IN ({marcadores})")
                 parametros.extend(valores)
+
+        # La cuenta se busca por los dos lados. Un traspaso se captura una
+        # sola vez, desde la cuenta que lo envía; filtrando sólo por
+        # `cuenta`, en la que lo recibe no aparecería nada y parecería que
+        # falta por registrar —y se registraría dos veces—.
+        if cuentas:
+            marcadores = ", ".join("?" for _ in cuentas)
+            condiciones.append(
+                f"(cuenta IN ({marcadores}) OR cuenta_destino IN ({marcadores}))"
+            )
+            parametros.extend(cuentas)
+            parametros.extend(cuentas)
 
         consulta = "SELECT * FROM v_movimientos"
         if condiciones:
@@ -135,6 +163,67 @@ class MovimientosRepository:
         if limite is not None:
             consulta += " LIMIT ?"
             parametros.append(limite)
+
+        with connect(self._db_path) as conexion:
+            df = pd.read_sql_query(consulta, conexion, params=parametros)
+
+        return _tipar(df)
+
+    def parecidos(
+        self,
+        fecha: date,
+        monto: float,
+        dias: int = 1,
+        excluir: list[int] | None = None,
+    ) -> pd.DataFrame:
+        """
+        Devuelve lo registrado que podría ser este mismo movimiento.
+
+        El criterio es el mínimo que reconoce un duplicado sin conocer el
+        documento: mismo monto y una fecha a un día o menos. No mira el
+        folio a propósito —dos bancos le ponen folios distintos al mismo
+        cobro— ni la cuenta, porque el duplicado típico está registrado
+        justo en la otra.
+
+        Se compara contra las dos fechas del movimiento, la suya y la que
+        reportó el banco, porque cualquiera de las dos puede ser la que
+        coincida con lo que se está capturando.
+
+        Parameters
+        ----------
+        fecha : date
+            Fecha de lo que se está capturando.
+        monto : float
+            Importe de lo que se está capturando, en positivo.
+        dias : int
+            Cuántos días alrededor siguen contando como la misma fecha.
+        excluir : list of int, optional
+            Ids que no cuentan: el movimiento que se edita no es su
+            propio duplicado.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Movimientos enriquecidos, del más reciente al más viejo.
+        """
+        desde = (fecha - timedelta(days=dias)).isoformat()
+        hasta = (fecha + timedelta(days=dias)).isoformat()
+
+        consulta = (
+            "SELECT * FROM v_movimientos "
+            "WHERE ABS(monto - ?) < 0.005 "
+            "AND (date(fecha) BETWEEN ? AND ? "
+            "     OR (fecha_banco IS NOT NULL "
+            "         AND date(fecha_banco) BETWEEN ? AND ?))"
+        )
+        parametros: list[object] = [float(monto), desde, hasta, desde, hasta]
+
+        if excluir:
+            marcadores = ", ".join("?" for _ in excluir)
+            consulta += f" AND id NOT IN ({marcadores})"
+            parametros.extend(int(identificador) for identificador in excluir)
+
+        consulta += " ORDER BY fecha DESC, id DESC"
 
         with connect(self._db_path) as conexion:
             df = pd.read_sql_query(consulta, conexion, params=parametros)

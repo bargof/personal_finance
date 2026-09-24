@@ -27,6 +27,10 @@ codeFont = "ui-monospace, SFMono-Regular, Menlo, monospace"
 
 # 15px en vez de 16 y títulos bastante más chicos que los de Streamlit:
 # la pantalla es un tablero, no una portada. Cabe más sin apretar.
+#
+# Las tablas se agrandan aparte, en `theme.py`: subir esto las agranda,
+# pero agranda también el número de cada métrica, que entonces ya no
+# cabe en su tarjeta.
 baseFontSize = 15
 headingFontSizes = ["1.85rem", "1.35rem", "1.1rem", "0.95rem", "0.85rem", "0.8rem"]
 headingFontWeights = [650, 600, 600, 600, 600, 600]
@@ -37,7 +41,10 @@ showWidgetBorder = true
 showSidebarBorder = false
 linkUnderline = false
 
-metricValueFontSize = "1.75rem"
+# El número de la tarjeta: 1.25rem en vez de 1.75. Con una docena de
+# cuentas en pantalla, el tamaño de titular obligaba a tarjetas anchas y
+# cortaba los importes largos; así caben enteros y en menos sitio.
+metricValueFontSize = "1.25rem"
 metricValueFontWeight = 600
 
 # ── Oscuro ───────────────────────────────────────────────

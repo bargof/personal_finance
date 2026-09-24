@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 
 import altair as alt
 import pandas as pd
@@ -454,3 +456,180 @@ def sin_datos(mensaje: str = "No hay movimientos en este periodo.") -> None:
 def reportar_error(error: Exception) -> None:
     """Muestra un error de validación como mensaje, no como traza."""
     st.error(str(error), icon=":material/error:")
+
+
+# ── Aviso de posible duplicado ───────────────────────────
+#
+# El mismo cobro puede entrar dos veces: capturado a mano y
+# otra vez al importar el estado de cuenta, o desde dos
+# documentos distintos —Mercado Pago y el banco que lo
+# liquida—, donde cada uno le pone su propio folio y la
+# deduplicación por folio no los reconoce como el mismo.
+# Fecha y monto sí, y por eso el aviso se dibuja mientras se
+# captura: es cuando todavía se puede no duplicar.
+#
+# El aviso no decide nada. Dos cafés iguales el mismo día son
+# dos gastos legítimos, así que sólo enseña qué hay y deja
+# mirarlo de cerca en Movimientos.
+
+
+#: Lo que «Ver más» deja pedido en la sesión: qué mirar, y que
+#: la página de movimientos abra la pestaña donde se mira.
+FOCO_PARECIDOS = "foco_parecidos"
+ABRIR_EXPLORAR = "abrir_explorar"
+PESTANA_MOVIMIENTOS = "pestana_movimientos"
+
+#: A dónde lleva «Ver más» desde cualquier otra página.
+PAGINA_MOVIMIENTOS = Path(__file__).resolve().parent / "app_pages" / "movimientos.py"
+
+#: Cuántos parecidos se enumeran en el aviso antes de resumir.
+_PARECIDOS_A_LA_VISTA = 3
+
+
+@st.cache_data(ttl="2m", max_entries=64, show_spinner=False)
+def _cargar_parecidos(
+    fecha: date, monto: float, excluir: tuple[int, ...], version: int
+) -> pd.DataFrame:
+    """Busca lo registrado que se parece; `version` fuerza el recálculo."""
+    return obtener_servicios().movimientos.parecidos(
+        fecha, monto, excluir=list(excluir)
+    )
+
+
+def buscar_parecidos(
+    fecha: date | None, monto: float, excluir: Iterable[int] = ()
+) -> pd.DataFrame:
+    """
+    Devuelve lo ya registrado con la misma fecha y el mismo monto.
+
+    Se llama en cada rerun mientras se captura, así que va cacheada: lo
+    que cambia entre pulsación y pulsación es casi siempre otro campo.
+    """
+    if fecha is None or not monto or monto <= 0:
+        return pd.DataFrame()
+
+    return _cargar_parecidos(
+        fecha, round(float(monto), 2), tuple(sorted(excluir)), version_datos()
+    )
+
+
+def _resumir(fila: pd.Series) -> str:
+    """Una línea que baste para reconocer el movimiento sin abrirlo."""
+    partes = [
+        f"**{int(fila['id'])}**",
+        f"{fila['fecha']:%d/%m/%Y}",
+        str(fila["tipo"]),
+        moneda(float(fila["monto"]), decimales=2),
+    ]
+
+    descripcion = str(fila["descripcion"] or fila["descripcion_banco"] or "").strip()
+    if descripcion:
+        partes.append(descripcion)
+
+    cuenta = str(fila["cuenta"] or "")
+    if fila["cuenta_destino"]:
+        cuenta += f" → {fila['cuenta_destino']}"
+    if cuenta:
+        partes.append(cuenta)
+
+    # El folio es justo lo que no cuadra cuando el duplicado viene de otro
+    # documento, así que se enseña: ver dos folios distintos para el mismo
+    # cobro explica por qué la importación no lo había cazado.
+    if str(fila["referencia_externa"] or "").strip():
+        partes.append(f"folio `{fila['referencia_externa']}`")
+
+    return " · ".join(partes)
+
+
+def avisar_parecidos(
+    fecha: date | None,
+    monto: float,
+    *,
+    clave: str,
+    excluir: Iterable[int] = (),
+    en_movimientos: bool = False,
+    al_salir: Callable[[], None] | None = None,
+) -> pd.DataFrame:
+    """
+    Avisa si lo que se está capturando ya parece estar registrado.
+
+    Parameters
+    ----------
+    fecha, monto : date or None, float
+        Lo capturado hasta ahora. Sin monto no hay nada que comparar.
+    clave : str
+        Sufijo único de los widgets: el aviso se dibuja en varias
+        pantallas y en varias líneas de la misma.
+    excluir : iterable of int
+        Ids que no cuentan como duplicado: el movimiento que se edita, o
+        el que esta misma línea del documento ya guardó.
+    en_movimientos : bool
+        True si el aviso se dibuja en la propia página de movimientos,
+        donde «Ver más» no navega, sólo cambia de pestaña.
+    al_salir : callable, optional
+        Se ejecuta antes de navegar, para que quien esté a media
+        captura pueda dejar su avance a salvo.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Los parecidos encontrados, vacío si no hay ninguno.
+    """
+    parecidos = buscar_parecidos(fecha, monto, excluir)
+    if parecidos.empty:
+        return parecidos
+
+    cuantos = len(parecidos)
+    with st.container(border=True):
+        st.warning(
+            f"**Posible duplicado** · ya hay {cuantos} "
+            f"movimiento{'s' if cuantos > 1 else ''} por "
+            f"{moneda(float(monto), decimales=2)} con esta fecha "
+            "(o un día antes o después).",
+            icon=":material/content_copy:",
+        )
+
+        for _, fila in parecidos.head(_PARECIDOS_A_LA_VISTA).iterrows():
+            st.markdown(_resumir(fila))
+
+        if cuantos > _PARECIDOS_A_LA_VISTA:
+            st.caption(f"y {cuantos - _PARECIDOS_A_LA_VISTA} más")
+
+        st.caption("Si es otro movimiento distinto, sigue adelante: esto sólo avisa.")
+
+        if st.button(
+            "Ver más",
+            key=f"ver_parecidos_{clave}",
+            icon=":material/open_in_new:",
+            help=(
+                "Abre estos movimientos en «Explorar y editar», donde "
+                "puedes revisarlos uno por uno."
+            ),
+        ):
+            enfocar_parecidos(fecha, monto, excluir)
+            if al_salir is not None:
+                al_salir()
+            if en_movimientos:
+                st.rerun()
+            st.switch_page(str(PAGINA_MOVIMIENTOS))
+
+    return parecidos
+
+
+def enfocar_parecidos(
+    fecha: date | None, monto: float, excluir: Iterable[int] = ()
+) -> None:
+    """
+    Deja pedido que movimientos enseñe estos parecidos y nada más.
+
+    Va por `session_state` y no por la pestaña directamente porque el
+    aviso se dibuja dentro de ella: para entonces el widget de las
+    pestañas ya existe y Streamlit no deja tocar su estado. La página lo
+    recoge al principio del rerun siguiente, antes de crearlo.
+    """
+    st.session_state[FOCO_PARECIDOS] = {
+        "fecha": fecha,
+        "monto": round(float(monto), 2),
+        "excluir": [int(identificador) for identificador in excluir],
+    }
+    st.session_state[ABRIR_EXPLORAR] = True

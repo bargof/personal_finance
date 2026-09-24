@@ -15,11 +15,13 @@ from finanzas.application.app.components import (
     tablero_del_periodo,
 )
 from finanzas.application.app.theme import rotulo
+from finanzas.domain.enums import TipoPatrimonio
 
 # ═══════════════════════════════════════════════════════════
 # Dashboard: el estado del periodo en una pantalla
 # ═══════════════════════════════════════════════════════════
 
+servicios = obtener_servicios()
 periodo = selector_periodo()
 tablero = tablero_del_periodo(periodo)
 reglas = tablero.reglas
@@ -34,6 +36,138 @@ if tablero.es_historico:
     )
 else:
     st.caption(f"Periodo analizado: {tablero.etiqueta} · moneda {reglas.moneda}")
+
+
+# ── Cuentas: cómo está cada una ──────────────────────────
+#
+# Va antes que el resultado del periodo y antes del corte por
+# falta de datos: «cuánto tengo» es de hoy y no depende del mes que se
+# esté mirando, ni deja de ser cierto en un mes sin movimientos.
+#
+# Los saldos no se capturan, se deducen; el detalle de cada uno —de qué
+# saldo verificado sale, cuántos movimientos median— vive en Patrimonio.
+
+rotulo("Tus cuentas hoy")
+
+saldos = servicios.patrimonio.saldos()
+flujo = servicios.movimientos.flujo_por_cuenta(
+    None if tablero.es_historico else periodo
+)
+movido = (
+    dict(zip(flujo["cuenta"], flujo["flujo_neto"], strict=False))
+    if not flujo.empty
+    else {}
+)
+cuando = "en total" if tablero.es_historico else f"en {tablero.etiqueta}"
+
+#: Medidas de cada tarjeta de cuenta, en píxeles. Fijas y no repartidas:
+#: con una docena de cuentas, repartir el ancho deja cada tarjeta tan
+#: estrecha que el importe sale cortado. Así envuelven en varias filas,
+#: se leen enteras y todas miden lo mismo, tengan delta o no.
+ANCHO_TARJETA = 170
+ALTO_TARJETA = 92
+
+st.caption(
+    f"Saldos deducidos al día de hoy. Debajo de cada uno, lo que se movió {cuando}."
+)
+
+if saldos.empty:
+    st.info(
+        "Aún no hay cuentas. Da de alta las tuyas en **Catálogos**.",
+        icon=":material/info:",
+    )
+else:
+    # El lado lo decide el tipo de cuenta, no el signo: un préstamo ya
+    # liquidado sigue siendo una deuda, con cero, y una cuenta de débito
+    # en números rojos es una cuenta a la que le falta un saldo
+    # verificado, no un préstamo.
+    tienes = saldos[saldos["lado"] == str(TipoPatrimonio.ACTIVO)]
+    debes = saldos[saldos["lado"] == str(TipoPatrimonio.PASIVO)]
+    deuda_en_cuentas = (
+        float(debes["saldo_visto"].clip(lower=0).sum()) if not debes.empty else 0.0
+    )
+
+    with st.container(horizontal=True):
+        st.metric(
+            "Disponible",
+            moneda(servicios.patrimonio.activos_liquidos(), simbolo),
+            border=True,
+            height=ALTO_TARJETA,
+            help="Efectivo, débito y ahorro: lo que puedes usar hoy mismo.",
+        )
+        st.metric(
+            "Deuda en cuentas",
+            moneda(deuda_en_cuentas, simbolo),
+            border=True,
+            height=ALTO_TARJETA,
+            help="Lo que deben tus tarjetas y préstamos.",
+        )
+        st.metric(
+            "Por pagar",
+            moneda(servicios.movimientos.total_por_pagar(), simbolo),
+            border=True,
+            height=ALTO_TARJETA,
+            help="Gasto ya hecho que todavía no sale de ninguna cuenta.",
+        )
+
+    if not tienes.empty:
+        with st.container(horizontal=True):
+            for fila in tienes.sort_values("saldo", ascending=False).itertuples():
+                neto = round(float(movido.get(fila.cuenta, 0.0)), 2)
+                pista = f"{fila.tipo}" + (
+                    f" · {fila.institucion}" if fila.institucion else ""
+                )
+                if not fila.verificado:
+                    pista += " · sin saldo verificado: se suma desde cero"
+                st.metric(
+                    fila.cuenta,
+                    moneda(fila.saldo_visto, simbolo),
+                    delta=f"{neto:+,.0f}" if neto else None,
+                    border=True,
+                    width=ANCHO_TARJETA,
+                    height=ALTO_TARJETA,
+                    help=pista,
+                )
+
+    if not debes.empty:
+        with st.container(horizontal=True):
+            for fila in debes.sort_values("saldo").itertuples():
+                # En una deuda la tarjeta enseña lo que debes, así que el
+                # delta es cuánto subió o bajó eso: entrar dinero a la
+                # cuenta la baja. Con `inverse`, bajar sale en verde.
+                neto = round(float(movido.get(fila.cuenta, 0.0)), 2)
+                pista = f"{fila.tipo}" + (
+                    f" · {fila.institucion}" if fila.institucion else ""
+                )
+                if not fila.verificado:
+                    pista += " · sin saldo verificado: se suma desde cero"
+                st.metric(
+                    fila.cuenta,
+                    moneda(fila.saldo_visto, simbolo),
+                    delta=f"{-neto:+,.0f} de deuda" if neto else None,
+                    delta_color="inverse",
+                    border=True,
+                    width=ANCHO_TARJETA,
+                    height=ALTO_TARJETA,
+                    help=pista,
+                )
+
+        st.caption(
+            "Una tarjeta o un préstamo es una cuenta de deuda: el gasto cuenta "
+            "una sola vez, al comprar, y lo que abonas después es un "
+            "**traspaso** hacia ella, no otro gasto."
+        )
+
+    # Una cuenta sin saldo verificado se suma desde cero, que casi nunca es
+    # verdad. Decir dónde se arregla vale más que marcarlo y callarse.
+    sin_verificar = saldos[~saldos["verificado"]]
+    if not sin_verificar.empty:
+        st.caption(
+            f"{len(sin_verificar)} cuentas se suman desde cero porque no tienen "
+            "un saldo real capturado. Ve a **Patrimonio → Verificar saldo**, "
+            "elige la cuenta y captura lo que dice hoy la app del banco: el "
+            "resto lo deduce el sistema, hacia adelante y hacia atrás."
+        )
 
 if not tablero.hay_datos:
     sin_datos()
@@ -273,7 +407,6 @@ with st.container(border=True):
         if tablero.es_historico
         else "Últimos movimientos del periodo"
     )
-    servicios = obtener_servicios()
     ultimos = tablero.movimientos.sort_values("fecha", ascending=False).head(10)
 
     st.dataframe(

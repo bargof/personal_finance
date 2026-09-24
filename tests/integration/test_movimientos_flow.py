@@ -216,6 +216,90 @@ def test_los_filtros_se_combinan(servicio, ids_catalogo):
     assert resultado.iloc[0]["descripcion"] == "Comida con amigos"
 
 
+def test_el_filtro_de_cuenta_mira_origen_y_destino(servicio, ids_catalogo):
+    """
+    Un traspaso aparece desde las dos cuentas que toca.
+
+    Se captura una sola vez, desde la que envía. Si al revisar la que
+    recibe no saliera, parecería que falta por registrar y acabaría
+    capturado dos veces: una como enviado y otra como recibido.
+    """
+    servicio.registrar(
+        fecha=date(2026, 8, 5),
+        tipo=TipoMovimiento.TRANSFERENCIA,
+        monto=1_500.0,
+        categoria_id=ids_catalogo["ahorro"],
+        cuenta_id=ids_catalogo["cuenta"],
+        cuenta_destino_id=ids_catalogo["ahorro_cuenta"],
+        descripcion="SPEI enviado",
+    )
+
+    desde_el_origen = servicio.buscar(cuentas=["Cuenta principal"])
+    desde_el_destino = servicio.buscar(cuentas=["Cuenta ahorro"])
+
+    assert len(desde_el_origen) == 1
+    assert len(desde_el_destino) == 1
+    assert desde_el_destino.iloc[0]["descripcion"] == "SPEI enviado"
+
+
+def test_el_filtro_de_cuenta_no_trae_las_ajenas(servicio, ids_catalogo):
+    """Mirar las dos patas no es dejar de filtrar."""
+    servicio.registrar(
+        fecha=date(2026, 8, 5),
+        tipo=TipoMovimiento.GASTO,
+        monto=420.0,
+        categoria_id=ids_catalogo["restaurantes"],
+        cuenta_id=ids_catalogo["efectivo"],
+    )
+
+    assert servicio.buscar(cuentas=["Cuenta principal"]).empty
+
+
+def test_el_filtro_de_monto_acota_por_los_dos_lados(servicio, ids_catalogo):
+    """Cada extremo filtra por su cuenta y los dos se combinan."""
+    for importe in (99.0, 420.0, 6_500.0):
+        servicio.registrar(
+            fecha=date(2026, 8, 5),
+            tipo=TipoMovimiento.GASTO,
+            monto=importe,
+            categoria_id=ids_catalogo["restaurantes"],
+            cuenta_id=ids_catalogo["efectivo"],
+        )
+
+    assert len(servicio.buscar(monto_min=100.0)) == 2
+    assert len(servicio.buscar(monto_max=500.0)) == 2
+    assert len(servicio.buscar(monto_min=100.0, monto_max=500.0)) == 1
+    assert len(servicio.buscar()) == 3
+
+
+def test_el_mismo_monto_arriba_y_abajo_busca_la_cifra_exacta(servicio, ids_catalogo):
+    """
+    Es como se rastrea un cobro concreto, y el redondeo no debe estorbar.
+
+    El importe se guarda como REAL: sin holgura, pedir 2.398,99 por los
+    dos lados dependería de cómo cayeran los decimales.
+    """
+    servicio.registrar(
+        fecha=date(2026, 8, 5),
+        tipo=TipoMovimiento.GASTO,
+        monto=2_398.99,
+        categoria_id=ids_catalogo["restaurantes"],
+        cuenta_id=ids_catalogo["efectivo"],
+    )
+    servicio.registrar(
+        fecha=date(2026, 8, 5),
+        tipo=TipoMovimiento.GASTO,
+        monto=2_399.00,
+        categoria_id=ids_catalogo["restaurantes"],
+        cuenta_id=ids_catalogo["efectivo"],
+    )
+
+    exacto = servicio.buscar(monto_min=2_398.99, monto_max=2_398.99)
+
+    assert len(exacto) == 1
+    assert exacto.iloc[0]["monto"] == 2_398.99
+
+
 def test_eliminar_muchos_devuelve_el_conteo(servicio, ids_catalogo):
     """El borrado en bloque reporta cuántas filas se fueron."""
     ids = [
@@ -470,3 +554,142 @@ def test_cambiar_un_gasto_a_traspaso_lo_deja_pagado(servicio, ids_catalogo):
     assert fila["pagado"]
     assert fila["gasto_real"] == 0.0
     assert fila["cuenta_destino"] == "Tarjeta crédito"
+
+
+# ═══════════════════════════════════════════════════════════
+# Posibles duplicados: fecha y monto, nada más
+#
+# El mismo cobro puede llegar por dos caminos —capturado a
+# mano e importado, o importado desde dos documentos— y cada
+# documento le pone su propio folio. Por eso esta búsqueda
+# mira lo único que los dos comparten.
+# ═══════════════════════════════════════════════════════════
+
+
+def test_parecidos_encuentra_el_mismo_dia_y_el_mismo_monto(servicio, ids_catalogo):
+    """El caso directo: ya está registrado, tal cual."""
+    servicio.registrar(
+        fecha=date(2026, 8, 2),
+        tipo=TipoMovimiento.GASTO,
+        monto=349.0,
+        categoria_id=ids_catalogo["restaurantes"],
+        cuenta_id=ids_catalogo["cuenta"],
+        descripcion="Comida",
+    )
+
+    parecidos = servicio.parecidos(date(2026, 8, 2), 349.0)
+
+    assert len(parecidos) == 1
+    assert parecidos.iloc[0]["descripcion"] == "Comida"
+
+
+def test_parecidos_admite_un_dia_de_diferencia_pero_no_dos(servicio, ids_catalogo):
+    """
+    El banco aplica al día siguiente; a dos días ya son otra cosa.
+
+    La fecha del banco se fija igual que la del movimiento para medir
+    sólo el margen: lo capturado a mano asume por defecto que el banco
+    lo aplica un día después, y eso ensancharía la ventana.
+    """
+    servicio.registrar(
+        fecha=date(2026, 8, 2),
+        tipo=TipoMovimiento.GASTO,
+        monto=349.0,
+        categoria_id=ids_catalogo["restaurantes"],
+        cuenta_id=ids_catalogo["cuenta"],
+        fecha_banco=date(2026, 8, 2),
+    )
+
+    assert len(servicio.parecidos(date(2026, 8, 3), 349.0)) == 1
+    assert len(servicio.parecidos(date(2026, 8, 1), 349.0)) == 1
+    assert servicio.parecidos(date(2026, 8, 4), 349.0).empty
+
+
+def test_parecidos_cubre_el_dia_en_que_el_banco_lo_aplicara(servicio, ids_catalogo):
+    """
+    Lo capturado a mano se reconoce también por la fecha que tendrá en
+    el banco: es la que traerá el estado de cuenta al importarlo.
+    """
+    servicio.registrar(
+        fecha=date(2026, 8, 2),
+        tipo=TipoMovimiento.GASTO,
+        monto=349.0,
+        categoria_id=ids_catalogo["restaurantes"],
+        cuenta_id=ids_catalogo["cuenta"],
+    )
+
+    assert len(servicio.parecidos(date(2026, 8, 4), 349.0)) == 1
+    assert servicio.parecidos(date(2026, 8, 5), 349.0).empty
+
+
+def test_parecidos_tambien_casa_con_la_fecha_del_banco(servicio, ids_catalogo):
+    """
+    Un movimiento corrido a su fecha de compra sigue siendo reconocible.
+
+    Lo que se captura puede coincidir con cualquiera de las dos fechas
+    del registrado: la suya o la que reportó el banco.
+    """
+    servicio.registrar(
+        fecha=date(2026, 8, 2),
+        tipo=TipoMovimiento.GASTO,
+        monto=349.0,
+        categoria_id=ids_catalogo["restaurantes"],
+        cuenta_id=ids_catalogo["cuenta"],
+        fecha_banco=date(2026, 8, 10),
+    )
+
+    assert len(servicio.parecidos(date(2026, 8, 10), 349.0)) == 1
+
+
+def test_parecidos_no_mira_ni_la_cuenta_ni_el_folio(servicio, ids_catalogo):
+    """
+    El duplicado que más cuesta ver viene del otro banco.
+
+    El mismo cobro aparece en el estado de quien lo procesa y en el de
+    la cuenta que lo liquida, cada uno con su folio y su cuenta, y la
+    deduplicación por folio no los empareja.
+    """
+    servicio.registrar(
+        fecha=date(2026, 8, 2),
+        tipo=TipoMovimiento.GASTO,
+        monto=349.0,
+        categoria_id=ids_catalogo["restaurantes"],
+        cuenta_id=ids_catalogo["tarjeta"],
+        referencia_externa="MP-11111",
+    )
+
+    parecidos = servicio.parecidos(date(2026, 8, 2), 349.0)
+
+    assert len(parecidos) == 1
+    assert parecidos.iloc[0]["referencia_externa"] == "MP-11111"
+
+
+def test_parecidos_excluye_lo_que_se_le_diga(servicio, ids_catalogo):
+    """Al editar, el movimiento no es su propio duplicado."""
+    movimiento_id = servicio.registrar(
+        fecha=date(2026, 8, 2),
+        tipo=TipoMovimiento.GASTO,
+        monto=349.0,
+        categoria_id=ids_catalogo["restaurantes"],
+        cuenta_id=ids_catalogo["cuenta"],
+    )
+
+    assert servicio.parecidos(date(2026, 8, 2), 349.0, excluir=[movimiento_id]).empty
+
+
+def test_parecidos_ignora_otro_monto(servicio, ids_catalogo):
+    """Un peso de diferencia ya es otro movimiento."""
+    servicio.registrar(
+        fecha=date(2026, 8, 2),
+        tipo=TipoMovimiento.GASTO,
+        monto=349.0,
+        categoria_id=ids_catalogo["restaurantes"],
+        cuenta_id=ids_catalogo["cuenta"],
+    )
+
+    assert servicio.parecidos(date(2026, 8, 2), 350.0).empty
+
+
+def test_parecidos_sin_monto_no_busca_nada(servicio):
+    """Mientras el monto está en cero no hay nada que comparar."""
+    assert servicio.parecidos(date(2026, 8, 2), 0.0).empty

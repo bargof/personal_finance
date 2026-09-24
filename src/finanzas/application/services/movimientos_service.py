@@ -42,6 +42,12 @@ _MEDIO_POR_TIPO_DE_CUENTA: dict[str, str] = {
 #: Tope defensivo para un solo movimiento; atrapa ceros de más al teclear.
 MONTO_MAXIMO = 100_000_000.0
 
+#: Días alrededor de la fecha que siguen contando como la misma al buscar
+#: si algo ya está registrado. Uno basta: el banco suele aplicar al día
+#: siguiente, y abrirlo más convierte en sospechoso cualquier gasto que se
+#: repite —el café de todos los días— sin serlo.
+DIAS_PARECIDO = 1
+
 
 class MovimientoInvalidoError(ValueError):
     """El movimiento no cumple las reglas mínimas de captura."""
@@ -88,6 +94,8 @@ class MovimientosService:
         limite: int | None = None,
         solo_por_pagar: bool = False,
         proyectos: list[str] | None = None,
+        monto_min: float | None = None,
+        monto_max: float | None = None,
     ) -> pd.DataFrame:
         """Devuelve los movimientos que cumplen los filtros dados."""
         return self._repo.listar(
@@ -101,7 +109,31 @@ class MovimientosService:
             limite=limite,
             solo_por_pagar=solo_por_pagar,
             proyectos=proyectos,
+            monto_min=monto_min,
+            monto_max=monto_max,
         )
+
+    def parecidos(
+        self,
+        fecha: date,
+        monto: float,
+        excluir: list[int] | None = None,
+        dias: int = DIAS_PARECIDO,
+    ) -> pd.DataFrame:
+        """
+        Devuelve lo registrado que podría ser el mismo movimiento.
+
+        Es la deduplicación de la importación en pequeño, para quien
+        captura a mano: misma cifra y una fecha a un día o menos. Sirve
+        de aviso, no de veto —dos cafés iguales el mismo día son dos
+        gastos—, así que no filtra por cuenta ni por folio: el duplicado
+        que más cuesta ver es el que entró por otro banco, con su propio
+        folio y en otra cuenta.
+        """
+        if monto <= 0:
+            return pd.DataFrame()
+
+        return self._repo.parecidos(fecha, monto, dias=dias, excluir=excluir)
 
     def proyectos(self) -> pd.DataFrame:
         """Devuelve el resumen de gasto e ingreso por proyecto."""

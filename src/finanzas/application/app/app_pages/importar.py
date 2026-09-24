@@ -6,6 +6,7 @@ from datetime import time
 import streamlit as st
 
 from finanzas.application.app.components import (
+    avisar_parecidos,
     invalidar_datos,
     moneda,
     obtener_servicios,
@@ -1272,6 +1273,18 @@ if st.session_state.get("paso") == "completar":
     if escritos:
         pie += f" Llevas {escritos} movimientos guardados."
     st.caption(pie)
+
+    # El documento puede traer un cobro que ya está registrado con otro
+    # folio —capturado a mano, o importado del banco que lo liquida— y
+    # entonces la deduplicación por folio no lo cazó. Fecha y monto sí.
+    # Va al final, fuera del camino de la captura.
+    avisar_parecidos(
+        candidato.fecha_final,
+        float(origen.monto),
+        clave=sello,
+        excluir=candidato.guardados,
+        al_salir=_recordar,
+    )
 
     st.stop()
 

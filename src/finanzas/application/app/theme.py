@@ -219,7 +219,7 @@ header[data-testid="stHeader"] {
    ═══════════════════════════════════════════════════════════ */
 
 [data-testid="stMetric"] {
-    padding: 0.9rem 1.1rem;
+    padding: 0.6rem 0.8rem;
     transition: border-color 140ms ease, box-shadow 140ms ease;
 }
 [data-testid="stMetric"]:hover {
@@ -230,17 +230,17 @@ header[data-testid="stHeader"] {
 }
 [data-testid="stMetricLabel"] {
     opacity: 0.72;
-    font-size: 0.78rem;
+    font-size: 0.7rem;
     font-weight: 500;
     letter-spacing: 0.02em;
     text-transform: uppercase;
 }
 [data-testid="stMetricValue"] {
     letter-spacing: -0.03em;
-    line-height: 1.2;
+    line-height: 1.15;
 }
 [data-testid="stMetricDelta"] {
-    font-size: 0.8rem;
+    font-size: 0.72rem;
 }
 
 /* ═══════════════════════════════════════════════════════════

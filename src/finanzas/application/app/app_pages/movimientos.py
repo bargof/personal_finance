@@ -6,11 +6,16 @@ import pandas as pd
 import streamlit as st
 
 from finanzas.application.app.components import (
+    ABRIR_EXPLORAR,
+    FOCO_PARECIDOS,
+    PESTANA_MOVIMIENTOS,
+    avisar_parecidos,
     invalidar_datos,
     moneda,
     obtener_servicios,
     reportar_error,
 )
+from finanzas.application.services.movimientos_service import DIAS_PARECIDO
 from finanzas.domain import captura
 from finanzas.domain.enums import (
     EstadoMovimiento,
@@ -64,6 +69,27 @@ SIN_SUBCATEGORIA = "— sin subcategoría —"
 SIN_MEDIO = "— sin especificar —"
 SIN_PROYECTO = "— ninguno —"
 SIN_DESTINO = "— elige una cuenta —"
+
+#: Lo que se está revisando: los ids elegidos en la tabla y por cuál se
+#: va. Vive en la sesión porque cada botón del recorrido es un rerun.
+EDICION = "edicion_movimientos"
+INDICE_EDICION = "indice_edicion"
+
+#: Clave del desplegable de filtros. Plegarlo es lo que le deja sitio a
+#: la tabla, así que su estado decide cuántas filas se enseñan.
+CAJA_FILTROS = "caja_filtros_movimientos"
+
+#: Alto de la tabla: el de una fila y el del encabezado, y cuántas filas
+#: caben con los filtros a la vista y sin ellos. Sin alto fijo, Streamlit
+#: enseña diez y deja el resto tras un scroll corto.
+ALTO_FILA = 44
+ALTO_ENCABEZADO = 45
+FILAS_CON_FILTROS = 7
+FILAS_SIN_FILTROS = 15
+
+#: Alto de las tarjetas de total, para que midan lo mismo tengan delta o
+#: no. Sin él, las tres primeras quedan más bajas que las dos últimas.
+ALTO_TOTAL = 92
 
 COLUMNAS_PRODUCTOS = ["producto", "cantidad", "precio_unitario", "nota"]
 CONFIG_PRODUCTOS = {
@@ -171,6 +197,25 @@ def _selector_texto_libre(
         help=ayuda or None,
     )
     return elegido or ""
+
+
+def _limpio(valor: object) -> str:
+    """Texto de una celda, con los vacíos de pandas como cadena vacía."""
+    if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+        return ""
+
+    return str(valor).strip()
+
+
+def _alto_tabla(cuantos: int, con_filtros: bool) -> int:
+    """
+    Alto en píxeles para que quepan tantas filas sin sobrar hueco.
+
+    Con los filtros plegados caben más: es justo para lo que se pliegan.
+    """
+    tope = FILAS_CON_FILTROS if con_filtros else FILAS_SIN_FILTROS
+
+    return ALTO_ENCABEZADO + max(min(cuantos, tope), 3) * ALTO_FILA
 
 
 def _texto(actual: pd.Series | None, campo: str) -> str:
@@ -650,7 +695,372 @@ def _editor_productos(base: pd.DataFrame, monto: float, key: str) -> pd.DataFram
     return editados
 
 
-registrar, explorar = st.tabs(["Registrar", "Explorar y editar"])
+def _salir_de_la_edicion() -> None:
+    """Cierra el recorrido y devuelve a la tabla."""
+    st.session_state.pop(EDICION, None)
+    st.session_state.pop(INDICE_EDICION, None)
+
+
+def _detalle(actual: pd.Series) -> dict[str, object]:
+    """
+    Dibuja un movimiento entero, solo en la pantalla.
+
+    Es la misma forma que el asistente de importación: uno por pantalla,
+    con todo lo suyo a la vista, en vez de un editor colgado debajo de
+    una tabla de la que hay que acordarse.
+
+    Devuelve lo capturado, que es lo que se guarda al avanzar.
+    """
+    movimiento_id = int(actual["id"])
+
+    with st.container(border=True):
+        cabecera = st.columns([3, 1])
+        with cabecera[0]:
+            st.markdown(
+                f"**Movimiento {movimiento_id}** · {_texto(actual, 'tipo')} de "
+                f"{moneda(float(actual['monto']), decimales=2)} en "
+                f"{_texto(actual, 'cuenta')}"
+            )
+            pista = f"Registrado el {actual['fecha']:%d/%m/%Y}"
+            if _texto(actual, "descripcion_banco"):
+                pista += f" · del banco: {_texto(actual, 'descripcion_banco')}"
+            if _texto(actual, "referencia_externa"):
+                pista += f" · folio `{_texto(actual, 'referencia_externa')}`"
+            st.caption(pista)
+        with cabecera[1]:
+            if float(actual["por_pagar"]) > 0:
+                st.warning("Pendiente de pago", icon=":material/schedule:")
+
+    valores = _formulario(f"edit_{movimiento_id}", actual)
+
+    # El detalle de una compra de varias cosas. Vive aparte del
+    # movimiento y no lo parte: sigue siendo un gasto con su categoría.
+    if captura.admite(str(valores["tipo"]), "productos"):
+        with st.container(border=True):
+            st.markdown("**Productos de esta compra**")
+            st.caption(
+                "Apunta qué venía dentro. No hace falta listarlo todo: el "
+                "detalle puede quedarse a medias."
+            )
+            productos = servicios.productos.de_movimiento(movimiento_id)
+            base = (
+                productos[COLUMNAS_PRODUCTOS]
+                if not productos.empty
+                else pd.DataFrame(columns=COLUMNAS_PRODUCTOS)
+            )
+            editados = _editor_productos(
+                base, float(actual["monto"]), key=f"prods_{movimiento_id}"
+            )
+
+            if st.button("Guardar productos", icon=":material/save:"):
+                servicios.productos.reemplazar(movimiento_id, editados)
+                invalidar_datos()
+                st.success("Productos guardados.", icon=":material/check:")
+                st.rerun()
+
+    return valores
+
+
+def _guardar(movimiento_id: int, valores: dict[str, object]) -> bool:
+    """Escribe el movimiento; devuelve si pudo."""
+    try:
+        servicios.movimientos.actualizar(movimiento_id, **valores)
+    except ValueError as error:
+        reportar_error(error)
+        return False
+
+    invalidar_datos()
+    return True
+
+
+def _recorrer(ids: list[int]) -> None:
+    """
+    Enseña los movimientos elegidos, uno por pantalla, con su navegación.
+
+    Se guarda al moverse de sitio, como en la importación: así corregir
+    diez no depende de acordarse de pulsar guardar diez veces. Lo que se
+    haya borrado por el camino sale de la lista sin romper el recorrido.
+    """
+    vivos: list[pd.Series] = []
+    for identificador in ids:
+        fila = servicios.movimientos.obtener(identificador)
+        if fila is not None:
+            vivos.append(fila)
+
+    if not vivos:
+        _salir_de_la_edicion()
+        st.rerun()
+
+    total = len(vivos)
+    indice = min(st.session_state.get(INDICE_EDICION, 0), total - 1)
+    actual = vivos[indice]
+    movimiento_id = int(actual["id"])
+
+    st.progress((indice + 1) / total, text=f"Movimiento {indice + 1} de {total}")
+
+    valores = _detalle(actual)
+
+    # Un contenedor horizontal hace wrap en el teléfono en vez de apilar
+    # las columnas. Avanzar va primero: es lo que el pulgar busca.
+    with st.container(horizontal=True):
+        ultimo = indice == total - 1
+        if st.button(
+            "Guardar y terminar" if ultimo else "Guardar y siguiente",
+            type="primary",
+            icon=":material/task_alt:" if ultimo else ":material/arrow_forward:",
+        ) and _guardar(movimiento_id, valores):
+            if ultimo:
+                _salir_de_la_edicion()
+            else:
+                st.session_state[INDICE_EDICION] = indice + 1
+            st.rerun()
+
+        if st.button(
+            "Anterior", icon=":material/arrow_back:", disabled=indice == 0
+        ) and _guardar(movimiento_id, valores):
+            st.session_state[INDICE_EDICION] = indice - 1
+            st.rerun()
+
+        if st.button("Volver a la tabla", icon=":material/table_rows:"):
+            _salir_de_la_edicion()
+            st.rerun()
+
+        if st.button("Duplicar hoy", icon=":material/content_copy:"):
+            try:
+                servicios.movimientos.duplicar(movimiento_id, date.today())
+            except ValueError as error:
+                reportar_error(error)
+            else:
+                invalidar_datos()
+                st.success("Movimiento duplicado con la fecha de hoy.")
+
+        if st.button("Eliminar", icon=":material/delete:"):
+            servicios.movimientos.eliminar(movimiento_id)
+            invalidar_datos()
+            st.session_state[EDICION] = [i for i in ids if i != movimiento_id]
+            st.session_state[INDICE_EDICION] = max(indice - 1, 0)
+            st.rerun()
+
+        if float(actual["por_pagar"]) > 0 and st.button(
+            "Marcar pagado hoy", icon=":material/payments:"
+        ):
+            servicios.movimientos.marcar_pagado(movimiento_id)
+            invalidar_datos()
+            st.rerun()
+
+    st.caption(
+        "Se guarda al avanzar y al terminar. «Volver a la tabla» deja este "
+        "movimiento como estaba."
+    )
+
+    # Al editar, el propio movimiento no cuenta como su duplicado: lo que
+    # se busca es si el mismo cobro ya entró por otro lado. Va al final:
+    # es un aviso, no un campo más del formulario.
+    avisar_parecidos(
+        valores["fecha"],
+        float(valores["monto"]),
+        clave=f"edit_{movimiento_id}",
+        excluir=[movimiento_id],
+        en_movimientos=True,
+        al_salir=_salir_de_la_edicion,
+    )
+
+
+def _filtrados() -> tuple[pd.DataFrame, bool]:
+    """
+    Dibuja los filtros y devuelve lo que casa con ellos.
+
+    Vive en una función porque la tabla de abajo se alimenta de dos
+    sitios: de estos filtros, o de los posibles duplicados que un aviso
+    de captura manda a mirar.
+
+    Returns
+    -------
+    tuple of (pandas.DataFrame, bool)
+        Lo filtrado y si la caja quedó abierta, que es lo que decide
+        cuánto sitio le queda a la tabla.
+    """
+    # Plegable y con estado propio: cerrarla es la forma de ver más
+    # filas sin tocar nada más. Los controles se siguen ejecutando
+    # cerrados, así que lo filtrado no cambia al plegarlos.
+    #
+    # Cada filtro va atado a la URL (`bind="query-params"`). Recargar
+    # abre una sesión nueva y `session_state` se pierde, pero la
+    # dirección no: así la vista vuelve como estaba y además se puede
+    # guardar en marcadores. Lo que vale su valor por defecto no se
+    # escribe, para que la dirección quede limpia.
+    caja = st.expander(
+        "Filtros",
+        expanded=True,
+        icon=":material/filter_alt:",
+        key=CAJA_FILTROS,
+        on_change="rerun",
+    )
+
+    with caja:
+        filtros_1 = st.columns([2, 2, 2])
+
+        with filtros_1[0]:
+            rango = st.date_input(
+                "Rango de fechas",
+                value=(date.today() - timedelta(days=90), date.today()),
+                format="DD/MM/YYYY",
+                key="fechas",
+                bind="query-params",
+            )
+
+        with filtros_1[1]:
+            tipos_filtro = st.multiselect(
+                "Tipo",
+                [str(valor) for valor in TipoMovimiento],
+                key="tipo",
+                bind="query-params",
+            )
+
+        with filtros_1[2]:
+            categorias_filtro = st.multiselect(
+                "Categoría",
+                catalogos["categorias"]["nombre"].tolist(),
+                key="categoria",
+                bind="query-params",
+            )
+
+        filtros_2 = st.columns([2, 2, 3])
+
+        with filtros_2[0]:
+            cuentas_filtro = st.multiselect(
+                "Cuenta",
+                catalogos["cuentas"]["nombre"].tolist(),
+                help=(
+                    "Cuenta el movimiento por los dos lados: un traspaso "
+                    "sale filtrando por la cuenta de la que salió y también "
+                    "por aquella a la que llegó."
+                ),
+                key="cuenta",
+                bind="query-params",
+            )
+
+        with filtros_2[1]:
+            estado_filtro = st.selectbox(
+                "Estado",
+                ["Todos", *[str(valor) for valor in EstadoMovimiento]],
+                key="estado",
+                bind="query-params",
+            )
+
+        with filtros_2[2]:
+            texto = st.text_input(
+                "Buscar en descripción, empresa, lugar, etiquetas y notas",
+                placeholder="café",
+                key="busca",
+                bind="query-params",
+            )
+
+        filtros_3 = st.columns([3, 2, 2, 2])
+
+        with filtros_3[0]:
+            proyectos_filtro = st.multiselect(
+                "Proyecto",
+                servicios.movimientos.nombres_de_proyecto(),
+                key="proyecto",
+                bind="query-params",
+            )
+
+        # Vacíos no filtran. La misma cifra en los dos busca esa cantidad
+        # exacta, que es como se rastrea un cobro concreto.
+        with filtros_3[1]:
+            monto_min = st.number_input(
+                "Monto desde",
+                min_value=0.0,
+                value=None,
+                step=50.0,
+                format="%.2f",
+                placeholder="sin mínimo",
+                key="desde",
+                bind="query-params",
+            )
+
+        with filtros_3[2]:
+            monto_max = st.number_input(
+                "Monto hasta",
+                min_value=0.0,
+                value=None,
+                step=50.0,
+                format="%.2f",
+                placeholder="sin máximo",
+                help=(
+                    "Pon la misma cifra arriba y abajo para buscar ese importe exacto."
+                ),
+                key="hasta",
+                bind="query-params",
+            )
+
+        with filtros_3[3]:
+            st.markdown("&nbsp;")
+            solo_por_pagar = st.checkbox(
+                "Sólo lo que debo",
+                help="Gastos ya incurridos que todavía no se han pagado.",
+                key="debo",
+                bind="query-params",
+            )
+
+    desde, hasta = (
+        rango if isinstance(rango, tuple) and len(rango) == 2 else (None, None)
+    )
+
+    encontrados = servicios.movimientos.buscar(
+        desde=desde,
+        hasta=hasta,
+        tipos=tipos_filtro,
+        categorias=categorias_filtro,
+        cuentas=cuentas_filtro,
+        estado=None if estado_filtro == "Todos" else estado_filtro,
+        texto=texto or None,
+        limite=500,
+        solo_por_pagar=solo_por_pagar,
+        proyectos=proyectos_filtro,
+        monto_min=monto_min,
+        monto_max=monto_max,
+    )
+
+    # Plegada, la caja ya no dice por qué la tabla enseña lo que enseña,
+    # así que el resumen lo dice ella.
+    if not caja.open:
+        activos = [
+            etiqueta
+            for etiqueta, valor in (
+                ("tipo", tipos_filtro),
+                ("categoría", categorias_filtro),
+                ("cuenta", cuentas_filtro),
+                ("proyecto", proyectos_filtro),
+                ("estado", None if estado_filtro == "Todos" else estado_filtro),
+                ("texto", texto),
+                ("monto", monto_min if monto_min is not None else monto_max),
+                ("sólo lo que debo", solo_por_pagar or None),
+            )
+            if valor
+        ]
+        resumen = f" · filtrando por {', '.join(activos)}" if activos else ""
+        if desde and hasta:
+            st.caption(f"Del {desde:%d/%m/%Y} al {hasta:%d/%m/%Y}{resumen}.")
+
+    return encontrados, caja.open
+
+
+EXPLORAR = "Explorar y editar"
+
+# «Ver más» de un aviso de duplicado pide la pestaña de explorar, pero no
+# la puede cambiar él mismo: cuando se dibuja, las pestañas ya existen y
+# su estado está cerrado. La petición queda en la sesión y se recoge
+# aquí, antes de crearlas.
+if st.session_state.pop(ABRIR_EXPLORAR, False):
+    st.session_state[PESTANA_MOVIMIENTOS] = EXPLORAR
+
+registrar, explorar = st.tabs(
+    ["Registrar", EXPLORAR],
+    key=PESTANA_MOVIMIENTOS,
+    on_change="rerun",
+)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -700,6 +1110,10 @@ with registrar:
                 cuantos = servicios.productos.reemplazar(nuevo_id, productos_nuevos)
 
             invalidar_datos()
+            # El recién registrado no es su propio duplicado: el
+            # formulario conserva sus valores y el aviso de abajo lo
+            # señalaría en cuanto se guarda.
+            st.session_state["ultimo_registrado"] = nuevo_id
             sufijo = "" if valores["fecha_pago"] else " · pendiente de pago"
             if cuantos:
                 sufijo += f" · {cuantos} productos"
@@ -709,92 +1123,86 @@ with registrar:
                 icon=":material/check_circle:",
             )
 
+    # Al final de la pantalla: es un aviso, no un paso de la captura, y
+    # estorba entre los campos.
+    ultimo = st.session_state.get("ultimo_registrado")
+    avisar_parecidos(
+        valores["fecha"],
+        float(valores["monto"]),
+        clave="captura",
+        excluir=[ultimo] if ultimo else [],
+        en_movimientos=True,
+    )
+
 
 # ═══════════════════════════════════════════════════════════
 # Explorar y editar
 # ═══════════════════════════════════════════════════════════
 
 with explorar:
-    with st.container(border=True):
-        st.markdown("**Filtros**")
-        filtros_1 = st.columns([2, 2, 2])
+    # Con un recorrido abierto, la pestaña es el recorrido: la tabla y
+    # sus filtros estorbarían encima de lo que se está corrigiendo.
+    en_revision = st.session_state.get(EDICION)
+    if en_revision:
+        _recorrer(list(en_revision))
+        st.stop()
 
-        with filtros_1[0]:
-            rango = st.date_input(
-                "Rango de fechas",
-                value=(date.today() - timedelta(days=90), date.today()),
-                format="DD/MM/YYYY",
+    # La tabla enseña o lo que casa con los filtros, o los posibles
+    # duplicados que un aviso de captura mandó a revisar. Lo segundo es
+    # temporal: se quita y vuelven los filtros como estaban.
+    foco = st.session_state.get(FOCO_PARECIDOS)
+
+    if foco:
+        desde_foco = foco["fecha"] - timedelta(days=DIAS_PARECIDO)
+        hasta_foco = foco["fecha"] + timedelta(days=DIAS_PARECIDO)
+        with st.container(border=True):
+            st.markdown("**Posibles duplicados**")
+            st.caption(
+                f"Lo registrado por {moneda(foco['monto'], decimales=2)} entre "
+                f"el {desde_foco:%d/%m/%Y} y el {hasta_foco:%d/%m/%Y}. "
+                "Selecciona uno en la tabla para abrir su detalle."
             )
+            if st.button("Volver a los filtros", icon=":material/filter_alt:"):
+                st.session_state.pop(FOCO_PARECIDOS, None)
+                st.rerun()
 
-        with filtros_1[1]:
-            tipos_filtro = st.multiselect(
-                "Tipo", [str(valor) for valor in TipoMovimiento]
-            )
+        movimientos = servicios.movimientos.parecidos(
+            foco["fecha"], foco["monto"], excluir=foco["excluir"]
+        )
+        con_filtros = True
+    else:
+        movimientos, con_filtros = _filtrados()
 
-        with filtros_1[2]:
-            categorias_filtro = st.multiselect(
-                "Categoría", catalogos["categorias"]["nombre"].tolist()
-            )
-
-        filtros_2 = st.columns([2, 2, 3])
-
-        with filtros_2[0]:
-            cuentas_filtro = st.multiselect(
-                "Cuenta", catalogos["cuentas"]["nombre"].tolist()
-            )
-
-        with filtros_2[1]:
-            estado_filtro = st.selectbox(
-                "Estado", ["Todos", *[str(valor) for valor in EstadoMovimiento]]
-            )
-
-        with filtros_2[2]:
-            texto = st.text_input(
-                "Buscar en descripción, empresa, lugar, etiquetas y notas",
-                placeholder="café",
-            )
-
-        filtros_3 = st.columns([3, 2])
-
-        with filtros_3[0]:
-            proyectos_filtro = st.multiselect(
-                "Proyecto", servicios.movimientos.nombres_de_proyecto()
-            )
-
-        with filtros_3[1]:
-            st.markdown("&nbsp;")
-            solo_por_pagar = st.checkbox(
-                "Sólo lo que debo",
-                help="Gastos ya incurridos que todavía no se han pagado.",
-            )
-
-    desde, hasta = (
-        rango if isinstance(rango, tuple) and len(rango) == 2 else (None, None)
-    )
-
-    movimientos = servicios.movimientos.buscar(
-        desde=desde,
-        hasta=hasta,
-        tipos=tipos_filtro,
-        categorias=categorias_filtro,
-        cuentas=cuentas_filtro,
-        estado=None if estado_filtro == "Todos" else estado_filtro,
-        texto=texto or None,
-        limite=500,
-        solo_por_pagar=solo_por_pagar,
-        proyectos=proyectos_filtro,
+    # Lo último que pasó, primero. Ya viene así del repositorio; se deja
+    # dicho aquí porque es la vista la que lo quiere, y porque los
+    # posibles duplicados llegan por otro camino y también lo quieren.
+    movimientos = movimientos.sort_values(
+        ["fecha", "id"], ascending=False, kind="stable"
     )
 
     if movimientos.empty:
-        st.info("Ningún movimiento coincide con los filtros.", icon=":material/info:")
+        st.info(
+            "Ya no queda ninguno de esos movimientos."
+            if foco
+            else "Ningún movimiento coincide con los filtros.",
+            icon=":material/info:",
+        )
         st.stop()
 
     totales = st.columns(5)
-    totales[0].metric("Movimientos", len(movimientos), border=True)
+    totales[0].metric("Movimientos", len(movimientos), border=True, height=ALTO_TOTAL)
     totales[1].metric(
-        "Ingresos", moneda(movimientos["ingreso_real"].sum()), border=True
+        "Ingresos",
+        moneda(movimientos["ingreso_real"].sum()),
+        border=True,
+        height=ALTO_TOTAL,
     )
-    totales[2].metric("Gastos", moneda(movimientos["gasto_real"].sum()), border=True)
+    totales[2].metric(
+        "Gastos",
+        moneda(movimientos["gasto_real"].sum()),
+        border=True,
+        height=ALTO_TOTAL,
+    )
     ahorro_neto = float(
         movimientos["patrimonio_creado"].sum() - movimientos["ahorro_retirado"].sum()
     )
@@ -806,6 +1214,7 @@ with explorar:
         else None,
         delta_color="off",
         border=True,
+        height=ALTO_TOTAL,
         help="Lo que entró a cuentas de ahorro o inversión menos lo que salió.",
     )
     adeudo = float(movimientos["por_pagar"].sum())
@@ -815,69 +1224,74 @@ with explorar:
         delta=f"{int((movimientos['por_pagar'] > 0).sum())} movimientos",
         delta_color="off",
         border=True,
+        height=ALTO_TOTAL,
         help="Gasto ya incurrido que todavía no sale de ninguna cuenta.",
     )
 
-    seleccion = st.dataframe(
-        movimientos[
-            [
-                "id",
-                "fecha",
-                "hora",
-                "tipo",
-                "categoria",
-                "subcategoria",
-                "descripcion",
-                "empresa",
-                "lugar",
-                "cuenta",
-                "cuenta_destino",
-                "medio_pago",
-                "monto",
-                "necesidad",
-                "naturaleza",
-                "recurrente",
-                "planeado",
-                "estado",
-                "fecha_pago",
-                "proyecto",
-                "etiquetas",
-                "fecha_banco",
-                "descripcion_banco",
-                "nota",
-            ]
-        ],
+    # Las columnas son las de leer de un vistazo, en el orden en que se
+    # lee un movimiento: cuándo, de dónde salió, qué fue, cuánto. Lo
+    # demás —necesidad, proyecto, etiquetas, nota— está en el detalle,
+    # que es donde se edita; aquí sólo estorbaba, porque treinta columnas
+    # dejan cada una demasiado angosta para leerse.
+    #
+    # Es un editor y no una tabla de sólo lectura porque la descripción
+    # se corrige de pasada, sin abrir nada. Lo demás va bloqueado: un
+    # cambio de tipo o de cuenta arrastra reglas —el pago, el destino, la
+    # categoría del tipo— que una celda suelta no puede aplicar.
+    #
+    # `st.data_editor` no tiene selección de filas, así que la primera
+    # columna es la casilla con la que se eligen las que se van a abrir.
+    tabla = movimientos.set_index("id")[
+        [
+            "fecha",
+            "cuenta",
+            "cuenta_destino",
+            "tipo",
+            "monto",
+            "descripcion",
+            "empresa",
+            "categoria",
+            "fecha_banco",
+            "descripcion_banco",
+        ]
+    ]
+    tabla.insert(0, "abrir", False)
+
+    editado = st.data_editor(
+        tabla,
         hide_index=True,
-        on_select="rerun",
-        selection_mode="multi-row",
+        num_rows="fixed",
+        disabled=[
+            columna
+            for columna in tabla.columns
+            if columna not in ("abrir", "descripcion")
+        ],
+        # La clave sigue a las filas que se enseñan: con una fija, los
+        # cambios pendientes de un filtro se aplicarían por posición a
+        # las filas de otro, que son movimientos distintos.
+        key=f"tabla_{hash(tuple(tabla.index))}",
+        # Filas más altas: con menos columnas el ancho ya no aprieta, y
+        # el aire entre renglones es lo que queda por ganar en lectura.
+        row_height=ALTO_FILA,
+        height=_alto_tabla(len(movimientos), con_filtros),
         column_config={
-            "id": st.column_config.NumberColumn("ID", width="small"),
+            "abrir": st.column_config.CheckboxColumn(
+                "Abrir", width="small", help="Marca las que quieras revisar."
+            ),
             "fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
-            "hora": st.column_config.TextColumn("Hora", width="small"),
-            "tipo": st.column_config.TextColumn("Tipo"),
-            "categoria": st.column_config.TextColumn("Categoría"),
-            "subcategoria": st.column_config.TextColumn("Subcategoría"),
-            "descripcion": st.column_config.TextColumn("Descripción", width="medium"),
-            "empresa": st.column_config.TextColumn("Empresa"),
-            "lugar": st.column_config.TextColumn("Lugar"),
             "cuenta": st.column_config.TextColumn("Cuenta"),
             "cuenta_destino": st.column_config.TextColumn(
                 "Destino", help="En traspasos y ahorro: a dónde llegó el dinero."
             ),
-            "medio_pago": st.column_config.TextColumn("Medio de pago"),
+            "tipo": st.column_config.TextColumn("Tipo"),
             "monto": st.column_config.NumberColumn("Monto", format="$%.2f"),
-            "necesidad": st.column_config.TextColumn("Necesidad"),
-            "naturaleza": st.column_config.TextColumn("Naturaleza"),
-            "recurrente": st.column_config.CheckboxColumn("Recurrente"),
-            "planeado": st.column_config.CheckboxColumn("Planeado"),
-            "estado": st.column_config.TextColumn("Estado"),
-            "fecha_pago": st.column_config.DateColumn(
-                "Pagado el",
-                format="DD/MM/YYYY",
-                help="Vacío significa que el gasto sigue pendiente de pago.",
+            "descripcion": st.column_config.TextColumn(
+                "Descripción",
+                width="large",
+                help="La única que se edita aquí mismo: escribe y sal de la celda.",
             ),
-            "proyecto": st.column_config.TextColumn("Proyecto"),
-            "etiquetas": st.column_config.TextColumn("Etiquetas"),
+            "empresa": st.column_config.TextColumn("Empresa"),
+            "categoria": st.column_config.TextColumn("Categoría"),
             "fecha_banco": st.column_config.DateColumn(
                 "En el banco", format="DD/MM/YYYY"
             ),
@@ -890,127 +1304,83 @@ with explorar:
                     "documento."
                 ),
             ),
-            "nota": st.column_config.TextColumn("Nota", width="medium"),
         },
     )
 
-    filas = seleccion.selection.rows
-    if not filas:
-        st.caption("Selecciona una fila para editarla, duplicarla o eliminarla.")
+    # Lo escrito en la celda se guarda solo: escribir y que no quede
+    # nada guardado sería peor que no dejar escribir.
+    corregidas = {
+        int(identificador): _limpio(nueva)
+        for identificador, nueva in editado["descripcion"].items()
+        if _limpio(nueva) != _limpio(tabla.at[identificador, "descripcion"])
+    }
+    if corregidas:
+        guardadas = 0
+        for identificador, nueva in corregidas.items():
+            try:
+                servicios.movimientos.actualizar(identificador, descripcion=nueva)
+            except ValueError as error:
+                reportar_error(error)
+            else:
+                guardadas += 1
+
+        # Sólo se recarga si algo se escribió. Recargar pase lo que pase
+        # daría vueltas sin fin cuando una fila no se puede guardar: la
+        # celda seguiría distinta de la base y volvería a intentarlo.
+        if guardadas:
+            invalidar_datos()
+            st.toast(f"{guardadas} descripciones guardadas.", icon=":material/check:")
+            st.rerun()
+
+    marcados = [int(identificador) for identificador in editado.index[editado["abrir"]]]
+    if not marcados:
+        st.caption(
+            "La descripción se edita aquí mismo. Marca **Abrir** en las filas "
+            "que quieras revisar completas: se abren una por pantalla, como "
+            "al importar."
+        )
         st.stop()
 
-    elegidos = movimientos.iloc[filas]
+    elegidos = movimientos[movimientos["id"].isin(marcados)]
+    deben = elegidos[elegidos["por_pagar"] > 0]
 
     st.divider()
 
-    if len(elegidos) > 1:
-        st.markdown(f"**{len(elegidos)} movimientos seleccionados**")
-        st.caption(f"Suman {moneda(elegidos['monto'].sum())}.")
-
-        deben = elegidos[elegidos["por_pagar"] > 0]
-        if not deben.empty:
-            st.caption(
-                f"{len(deben)} están pendientes de pago por "
-                f"{moneda(float(deben['por_pagar'].sum()))}."
-            )
-
-        with st.container(horizontal=True):
-            if not deben.empty and st.button(
-                "Marcar pagados hoy", type="primary", icon=":material/payments:"
-            ):
-                for identificador in deben["id"]:
-                    servicios.movimientos.marcar_pagado(int(identificador))
-                invalidar_datos()
-                st.success(
-                    f"{len(deben)} movimientos marcados como pagados.",
-                    icon=":material/check:",
-                )
-                st.rerun()
-
-            if st.button(
-                "Eliminar seleccionados", type="secondary", icon=":material/delete:"
-            ):
-                borrados = servicios.movimientos.eliminar_muchos(
-                    [int(valor) for valor in elegidos["id"]]
-                )
-                invalidar_datos()
-                st.success(
-                    f"{borrados} movimientos eliminados.", icon=":material/check:"
-                )
-                st.rerun()
-
-        st.stop()
-
-    # ── Editor: el mismo formulario, con los valores del movimiento ──
-
-    actual = elegidos.iloc[0]
-    movimiento_id = int(actual["id"])
-
-    st.markdown(f"**Editar movimiento {movimiento_id}**")
-    valores = _formulario(f"edit_{movimiento_id}", actual)
+    resumen = (
+        f"**{len(elegidos)} seleccionado{'s' if len(elegidos) > 1 else ''}** · "
+        f"suman {moneda(elegidos['monto'].sum())}"
+    )
+    if not deben.empty:
+        resumen += (
+            f" · {len(deben)} pendientes de pago por "
+            f"{moneda(float(deben['por_pagar'].sum()))}"
+        )
+    st.markdown(resumen)
 
     with st.container(horizontal=True):
-        if st.button("Guardar cambios", type="primary", icon=":material/save:"):
-            try:
-                servicios.movimientos.actualizar(movimiento_id, **valores)
-            except ValueError as error:
-                reportar_error(error)
-            else:
-                invalidar_datos()
-                st.success("Movimiento actualizado.", icon=":material/check:")
-                st.rerun()
-
-        if st.button("Duplicar hoy", icon=":material/content_copy:"):
-            try:
-                servicios.movimientos.duplicar(movimiento_id, date.today())
-            except ValueError as error:
-                reportar_error(error)
-            else:
-                invalidar_datos()
-                st.success("Movimiento duplicado con la fecha de hoy.")
-                st.rerun()
-
-        if st.button("Eliminar", icon=":material/delete:"):
-            servicios.movimientos.eliminar(movimiento_id)
-            invalidar_datos()
-            st.success("Movimiento eliminado.", icon=":material/check:")
+        if st.button(
+            "Abrir en detalle", type="primary", icon=":material/edit_document:"
+        ):
+            st.session_state[EDICION] = [int(valor) for valor in elegidos["id"]]
+            st.session_state[INDICE_EDICION] = 0
             st.rerun()
 
-    # El detalle de una compra de varias cosas. Vive aparte del
-    # movimiento y no lo parte: sigue siendo un gasto con su categoría.
-    if captura.admite(str(valores["tipo"]), "productos"):
-        with st.container(border=True):
-            st.markdown("**Productos de esta compra**")
-            st.caption(
-                "Apunta qué venía dentro. No hace falta listarlo todo: el "
-                "detalle puede quedarse a medias."
-            )
-            productos = servicios.productos.de_movimiento(movimiento_id)
-            base = (
-                productos[COLUMNAS_PRODUCTOS]
-                if not productos.empty
-                else pd.DataFrame(columns=COLUMNAS_PRODUCTOS)
-            )
-            editados = _editor_productos(
-                base, float(actual["monto"]), key=f"prods_{movimiento_id}"
-            )
-
-            if st.button("Guardar productos", icon=":material/save:"):
-                servicios.productos.reemplazar(movimiento_id, editados)
-                invalidar_datos()
-                st.success("Productos guardados.", icon=":material/check:")
-                st.rerun()
-
-    if float(actual["por_pagar"]) > 0:
-        st.info(
-            f"Este gasto lleva pendiente de pago desde el "
-            f"{actual['fecha'].strftime('%d/%m/%Y')}.",
-            icon=":material/schedule:",
-        )
-        if st.button(
-            "Marcar como pagado hoy", type="primary", icon=":material/payments:"
+        if not deben.empty and st.button(
+            "Marcar pagados hoy", icon=":material/payments:"
         ):
-            servicios.movimientos.marcar_pagado(movimiento_id)
+            for identificador in deben["id"]:
+                servicios.movimientos.marcar_pagado(int(identificador))
             invalidar_datos()
-            st.success("Movimiento marcado como pagado.", icon=":material/check:")
+            st.success(
+                f"{len(deben)} movimientos marcados como pagados.",
+                icon=":material/check:",
+            )
+            st.rerun()
+
+        if st.button("Eliminar seleccionados", icon=":material/delete:"):
+            borrados = servicios.movimientos.eliminar_muchos(
+                [int(valor) for valor in elegidos["id"]]
+            )
+            invalidar_datos()
+            st.success(f"{borrados} movimientos eliminados.", icon=":material/check:")
             st.rerun()
