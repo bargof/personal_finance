@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta
 
 import pandas as pd
 
@@ -488,7 +488,7 @@ def _construir(**datos: object) -> Movimiento:
         etiquetas=str(datos.get("etiquetas") or ""),
         nota=str(datos.get("nota") or ""),
         estado=EstadoMovimiento(datos.get("estado") or EstadoMovimiento.CONFIRMADO),
-        fecha_pago=datos.get("fecha_pago"),  # type: ignore[arg-type]
+        fecha_pago=_fecha_o_nulo(datos.get("fecha_pago")),
         descripcion_banco=str(datos.get("descripcion_banco") or ""),
         referencia_externa=str(datos.get("referencia_externa") or ""),
         empresa=str(datos.get("empresa") or ""),
@@ -617,7 +617,9 @@ def _fecha_o_nulo(valor: object) -> date | None:
     """Convierte a `date` cuidando los NaT que llegan desde pandas."""
     if valor is None or pd.isna(valor):
         return None
-    if isinstance(valor, date):
+    # `pd.Timestamp` hereda de `datetime`, que hereda de `date`: sin
+    # descartarlo primero se colaría con hora y se guardaría «…T00:00:00».
+    if isinstance(valor, date) and not isinstance(valor, datetime):
         return valor
     return pd.Timestamp(valor).date()
 

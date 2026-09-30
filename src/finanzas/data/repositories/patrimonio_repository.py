@@ -84,7 +84,9 @@ class PatrimonioRepository:
         filtro = "WHERE activa = 1" if solo_activas else ""
         with connect(self._db_path) as conexion:
             return pd.read_sql_query(
-                f"SELECT id, nombre, tipo, institucion, activa "
+                f"SELECT id, nombre, tipo, institucion, activa, "
+                f"dia_corte, dia_pago, pago_mensual, restringida, "
+                f"tasa_anual, posponer_hasta "
                 f"FROM cuentas {filtro} ORDER BY nombre",
                 conexion,
             )
@@ -136,6 +138,7 @@ class PatrimonioRepository:
                     "ancla_saldo": deducido.ancla.saldo if deducido.ancla else None,
                     "ancla_origen": deducido.ancla.origen if deducido.ancla else "",
                     "movimientos": deducido.movimientos,
+                    "restringida": bool(cuenta.restringida),
                 }
             )
 
@@ -156,6 +159,7 @@ class PatrimonioRepository:
                 "ancla_saldo",
                 "ancla_origen",
                 "movimientos",
+                "restringida",
             ],
         )
         if not df.empty:
@@ -245,6 +249,133 @@ class PatrimonioRepository:
                 """,
                 conexion,
             )
+
+    # ── Lo exigible de cada deuda ────────────────────────
+
+    def exigibles(self) -> pd.DataFrame:
+        """
+        Devuelve lo declarado exigible por cuenta y lo abonado desde entonces.
+
+        El abono es todo lo que entró a la cuenta desde el día en que se
+        declaró, incluido: en una deuda, lo que entra es lo que se pagó.
+        """
+        with connect(self._db_path) as conexion:
+            df = pd.read_sql_query(
+                """
+                SELECT
+                    e.cuenta_id,
+                    e.monto,
+                    e.declarado_el,
+                    e.fecha_limite,
+                    e.nota,
+                    COALESCE((
+                        SELECT SUM(f.movimiento)
+                        FROM v_flujo_cuentas f
+                        WHERE f.cuenta_id = e.cuenta_id
+                          AND f.movimiento > 0
+                          AND f.fecha >= e.declarado_el
+                    ), 0) AS abonado
+                FROM exigibles e
+                """,
+                conexion,
+            )
+
+        for columna in ("declarado_el", "fecha_limite"):
+            df[columna] = pd.to_datetime(df[columna], errors="coerce")
+        return df
+
+    def guardar_exigible(
+        self,
+        cuenta_id: int,
+        monto: float,
+        declarado_el: date,
+        fecha_limite: date | None,
+        nota: str,
+    ) -> None:
+        """Crea o reemplaza lo exigible de una cuenta: hay uno por cuenta."""
+        with connect(self._db_path) as conexion:
+            conexion.execute(
+                """
+                INSERT INTO exigibles
+                    (cuenta_id, monto, declarado_el, fecha_limite, nota)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(cuenta_id) DO UPDATE SET
+                    monto = excluded.monto,
+                    declarado_el = excluded.declarado_el,
+                    fecha_limite = excluded.fecha_limite,
+                    nota = excluded.nota
+                """,
+                (
+                    cuenta_id,
+                    float(monto),
+                    declarado_el.isoformat(),
+                    fecha_limite.isoformat() if fecha_limite else None,
+                    nota.strip(),
+                ),
+            )
+
+    def abonos(
+        self, cuenta_id: int, despues_de: date, hasta: date | None = None
+    ) -> float:
+        """
+        Suma lo que entró a una cuenta después de `despues_de`.
+
+        En una deuda, lo que entra es lo que se pagó. `hasta` cierra el
+        rango, incluido.
+        """
+        condicion = "AND fecha <= ?" if hasta is not None else ""
+        parametros: list[object] = [cuenta_id, despues_de.isoformat()]
+        if hasta is not None:
+            parametros.append(hasta.isoformat())
+
+        with connect(self._db_path) as conexion:
+            fila = conexion.execute(
+                f"""
+                SELECT COALESCE(SUM(movimiento), 0) AS total
+                FROM v_flujo_cuentas
+                WHERE cuenta_id = ? AND movimiento > 0 AND fecha > ? {condicion}
+                """,
+                parametros,
+            ).fetchone()
+
+        return float(fila["total"])
+
+    def guardar_calendario_deuda(
+        self,
+        cuenta_id: int,
+        dia_corte: int | None,
+        dia_pago: int | None,
+        pago_mensual: float | None,
+    ) -> None:
+        """Fija los días de corte y de pago, y la parcialidad, de una deuda."""
+        with connect(self._db_path) as conexion:
+            conexion.execute(
+                """
+                UPDATE cuentas
+                   SET dia_corte = ?, dia_pago = ?, pago_mensual = ?
+                 WHERE id = ?
+                """,
+                (dia_corte, dia_pago, pago_mensual, cuenta_id),
+            )
+
+    def guardar_reglas_deuda(
+        self, cuenta_id: int, tasa_anual: float | None, posponer_hasta: date | None
+    ) -> None:
+        """Fija lo que cuesta posponer una deuda y hasta cuándo se puede."""
+        with connect(self._db_path) as conexion:
+            conexion.execute(
+                "UPDATE cuentas SET tasa_anual = ?, posponer_hasta = ? WHERE id = ?",
+                (
+                    tasa_anual,
+                    posponer_hasta.isoformat() if posponer_hasta else None,
+                    cuenta_id,
+                ),
+            )
+
+    def eliminar_exigible(self, cuenta_id: int) -> None:
+        """Quita lo exigible de una cuenta."""
+        with connect(self._db_path) as conexion:
+            conexion.execute("DELETE FROM exigibles WHERE cuenta_id = ?", (cuenta_id,))
 
     # ── Adeudos a una fecha ──────────────────────────────
 

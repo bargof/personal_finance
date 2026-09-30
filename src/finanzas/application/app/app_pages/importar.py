@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from datetime import time
 
+import pandas as pd
 import streamlit as st
 
 from finanzas.application.app.components import (
@@ -480,7 +481,15 @@ _PREFIJOS_DE_LINEA = (
 
 def _reiniciar() -> None:
     """Deja la página lista para un documento nuevo, sin rastro del anterior."""
-    for clave in ("importacion", "paso", "indice", "terminado", "anclados"):
+    for clave in (
+        "importacion",
+        "paso",
+        "indice",
+        "terminado",
+        "importados",
+        "completados",
+        "anclados",
+    ):
         st.session_state.pop(clave, None)
     # Lo que los widgets de cada línea dejaron persistido tampoco se queda:
     # no debe reaparecer en el documento siguiente.
@@ -509,7 +518,14 @@ def _sesion_compatible() -> bool:
         and all(
             hasattr(c, campo)
             for c in muestra
-            for campo in ("empresa", "lugar", "hora", "productos", "guardados")
+            for campo in (
+                "empresa",
+                "lugar",
+                "hora",
+                "productos",
+                "guardados",
+                "completar",
+            )
         )
         and all(hasattr(c.origen, "es_traspaso_propio") for c in muestra)
     )
@@ -729,6 +745,103 @@ if st.session_state.get("paso") == "revisar":
         invalidar_datos()
         _recordar()
 
+    # ── Lo capturado a mano, que el banco puede completar ────
+    #
+    # Una tercera salida, aparte de importar o ignorar: la línea es un
+    # movimiento que ya registraste sin datos del banco, y en vez de
+    # importarla otra vez se le pasan al tuyo el concepto, el folio y la
+    # fecha del banco. Vive aparte de la tabla de arriba para no cambiar
+    # lo que significa su casilla.
+    vinculables = resultado.vinculables
+    if vinculables:
+        with st.container(border=True):
+            st.subheader("Registrados a mano que puedo completar")
+            st.caption(
+                "Estas líneas del banco parecen movimientos que capturaste tú, "
+                "sin los datos del banco. Completarlos les pone el concepto, el "
+                "folio y la fecha del banco —y la fecha de pago si no la tenían— "
+                "sin tocar tu descripción, categoría ni fecha. Desmarca los que "
+                "no sean el mismo movimiento: esa línea se queda ignorada."
+            )
+            tabla_vinculos = pd.DataFrame(
+                [
+                    {
+                        "completar": c.completar,
+                        "registrado": c.vinculo_resumen,
+                        "fecha": c.origen.fecha,
+                        "descripcion_banco": c.origen.descripcion_banco,
+                        "referencia": c.origen.referencia,
+                        "monto": c.origen.monto,
+                        "estado": c.estado,
+                    }
+                    for c in vinculables
+                ]
+            )
+            editada_vinculos = st.data_editor(
+                tabla_vinculos,
+                hide_index=True,
+                width="stretch",
+                disabled=[
+                    "registrado",
+                    "fecha",
+                    "descripcion_banco",
+                    "referencia",
+                    "monto",
+                    "estado",
+                ],
+                column_config={
+                    "completar": st.column_config.CheckboxColumn(
+                        "Completar", width="small"
+                    ),
+                    "registrado": st.column_config.TextColumn(
+                        "Tu registro", width="medium"
+                    ),
+                    "fecha": st.column_config.DateColumn(
+                        "Fecha del banco", format="DD/MM/YYYY"
+                    ),
+                    "descripcion_banco": st.column_config.TextColumn(
+                        "Concepto del banco", width="large"
+                    ),
+                    "referencia": st.column_config.TextColumn("Folio"),
+                    "monto": st.column_config.NumberColumn("Monto", format="$%.2f"),
+                    "estado": st.column_config.TextColumn("Coincidencia"),
+                },
+                key=f"tabla_vinculos_{resultado.cuenta_id}",
+            )
+
+            cambio = False
+            en_conflicto = 0
+            for candidato, marcar in zip(
+                vinculables, editada_vinculos["completar"], strict=True
+            ):
+                marcar = bool(marcar)
+                # Importarla como nueva y completar la tuya sería contar el
+                # mismo dinero dos veces: gana la tabla de arriba.
+                if marcar and candidato.incluir:
+                    marcar = False
+                    en_conflicto += 1
+                if marcar != candidato.completar:
+                    candidato.completar = marcar
+                    cambio = True
+            if cambio:
+                _recordar()
+
+            if en_conflicto:
+                st.warning(
+                    f"{en_conflicto} de estas líneas también están marcadas para "
+                    "importarse como nuevas arriba, así que no se completan: una "
+                    "línea es un movimiento nuevo o el que ya tenías, no las dos.",
+                    icon=":material/call_split:",
+                )
+
+            ya_completados = sum(1 for c in vinculables if c.completado)
+            if ya_completados:
+                st.caption(
+                    f"{ya_completados} ya se completaron. Desmarcar uno y "
+                    "continuar lo deja como estaba."
+                )
+
+    a_completar = resultado.a_completar
     seleccionados = resultado.a_importar
     st.caption(
         f"**{len(seleccionados)} seleccionados** por "
@@ -745,15 +858,25 @@ if st.session_state.get("paso") == "revisar":
         )
 
     with st.container(horizontal=True):
+        pendientes_de_deshacer = any(
+            c.completado and not (c.completar and not c.incluir) for c in vinculables
+        )
         if st.button(
             "Completar información",
             type="primary",
             icon=":material/edit_note:",
-            disabled=not seleccionados,
+            disabled=not (seleccionados or a_completar or pendientes_de_deshacer),
         ):
-            st.session_state["paso"] = "completar"
+            # Lo capturado a mano se completa aquí, de una vez: no hay nada
+            # que preguntar uno por uno. Si sólo había eso, se va directo
+            # al cierre.
+            if vinculables:
+                importacion.aplicar_vinculos(resultado)
+                invalidar_datos()
+            siguiente = "completar" if seleccionados else "guardar"
+            st.session_state["paso"] = siguiente
             st.session_state.setdefault("indice", 0)
-            _recordar("completar")
+            _recordar(siguiente)
             st.rerun()
 
         if st.button("Empezar de nuevo", icon=":material/restart_alt:"):
@@ -1299,9 +1422,15 @@ if st.session_state.get("paso") == "completar":
 if st.session_state.get("paso") == "guardar" and not st.session_state.get("terminado"):
     escritos = sum(len(c.guardados) for c in resultado.candidatos)
     incompletos = [c for c in resultado.a_importar if not c.completo]
+    completados = sum(1 for c in resultado.candidatos if c.completado)
 
     st.success(
-        f"Llevas {escritos} movimientos guardados de {lectura.banco}.",
+        f"Llevas {escritos} movimientos guardados de {lectura.banco}"
+        + (
+            f" y {completados} de los tuyos completados con sus datos."
+            if completados
+            else "."
+        ),
         icon=":material/task_alt:",
     )
 
@@ -1314,6 +1443,8 @@ if st.session_state.get("paso") == "guardar" and not st.session_state.get("termi
             moneda(sum(c.origen.monto for c in resultado.candidatos if c.ya_guardado)),
             border=True,
         )
+        if completados:
+            st.metric("Completados con el banco", completados, border=True)
         if incompletos:
             st.metric("Sin completar", len(incompletos), border=True)
 
@@ -1331,7 +1462,9 @@ if st.session_state.get("paso") == "guardar" and not st.session_state.get("termi
             # Los saldos que declara el documento son la mejor verdad que hay
             # sobre la cuenta: se anclan al cerrar, cuando ya está todo.
             anclados = importacion.anclar(resultado)
-            st.session_state["terminado"] = escritos
+            st.session_state["terminado"] = True
+            st.session_state["importados"] = escritos
+            st.session_state["completados"] = completados
             st.session_state["anclados"] = anclados
             importacion.olvidar_avance()
             invalidar_datos()
@@ -1350,10 +1483,12 @@ if st.session_state.get("paso") == "guardar" and not st.session_state.get("termi
 # ═══════════════════════════════════════════════════════════
 
 if st.session_state.get("terminado"):
-    guardados = st.session_state["terminado"]
+    guardados = st.session_state.get("importados", 0)
+    completados = st.session_state.get("completados", 0)
 
     st.success(
-        f"Listo: {guardados} movimientos importados de {lectura.banco}.",
+        f"Listo: {guardados} movimientos importados de {lectura.banco}"
+        + (f" y {completados} de los tuyos completados." if completados else "."),
         icon=":material/check_circle:",
     )
     st.balloons()

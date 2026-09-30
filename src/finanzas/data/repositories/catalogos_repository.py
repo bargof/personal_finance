@@ -159,7 +159,7 @@ class CatalogosRepository:
         filtro = "WHERE activa = 1" if solo_activas else ""
         with connect(self._db_path) as conexion:
             return pd.read_sql_query(
-                f"SELECT id, nombre, tipo, institucion, activa "
+                f"SELECT id, nombre, tipo, institucion, activa, restringida "
                 f"FROM cuentas {filtro} ORDER BY nombre",
                 conexion,
             )
@@ -192,16 +192,29 @@ class CatalogosRepository:
         tipo: str,
         institucion: str,
         activa: bool,
+        restringida: bool | None = None,
     ) -> None:
-        """Actualiza los datos de una cuenta."""
+        """
+        Actualiza los datos de una cuenta.
+
+        `restringida` en None la deja como estaba.
+        """
         with connect(self._db_path) as conexion:
             conexion.execute(
                 """
                 UPDATE cuentas
-                   SET nombre = ?, tipo = ?, institucion = ?, activa = ?
+                   SET nombre = ?, tipo = ?, institucion = ?, activa = ?,
+                       restringida = COALESCE(?, restringida)
                  WHERE id = ?
                 """,
-                (nombre.strip(), tipo, institucion.strip(), int(activa), cuenta_id),
+                (
+                    nombre.strip(),
+                    tipo,
+                    institucion.strip(),
+                    int(activa),
+                    None if restringida is None else int(restringida),
+                    cuenta_id,
+                ),
             )
 
     def eliminar_cuenta(self, cuenta_id: int) -> None:

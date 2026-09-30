@@ -31,6 +31,7 @@ PAGINAS = (
     "app_pages/deseos.py",
     "app_pages/patrimonio.py",
     "app_pages/suscripciones.py",
+    "app_pages/pagos.py",
     "app_pages/analisis.py",
     "app_pages/catalogos.py",
     "app_pages/configuracion.py",

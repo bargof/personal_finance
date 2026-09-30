@@ -15,6 +15,7 @@ from finanzas.application.app.components import (
     reportar_error,
     tabla_equivalente,
 )
+from finanzas.application.services.patrimonio_service import FUENTE_CAPTURADO
 from finanzas.domain.enums import Liquidez, OrigenSaldo, TipoCuenta, TipoPatrimonio
 
 # ═══════════════════════════════════════════════════════════
@@ -37,6 +38,17 @@ st.caption(
 )
 
 SUBTIPOS = ("Inmueble", "Vehículo", "Otros bienes", "Préstamo personal", "Otro")
+
+
+def _entero(valor: object) -> int | None:
+    """Un día guardado, o None para dejar el campo vacío."""
+    return None if valor is None or pd.isna(valor) else int(valor)
+
+
+def _numero(valor: object) -> float | None:
+    """Una cifra guardada, o None para dejar el campo vacío."""
+    return None if valor is None or pd.isna(valor) else float(valor)
+
 
 # ── La fecha del balance ─────────────────────────────────
 #
@@ -322,6 +334,295 @@ with verificar_tab:
 # ═══════════════════════════════════════════════════════════
 
 with adeudos_tab:
+    # ── Lo exigible de cada deuda ────────────────────────
+    #
+    # El saldo de un préstamo o una tarjeta es todo lo que se debe; aquí
+    # se dice cuánto de eso ya hay que pagar. Los abonos que registres
+    # después lo van descontando solos.
+
+    exigibles = servicios.patrimonio.exigibles()
+    with st.container(border=True):
+        st.subheader("Lo que ya es exigible de tus deudas")
+        st.caption(
+            "De lo que debe cada tarjeta o préstamo, la parte que ya toca pagar. "
+            "Con sus días fijos sale sola cada ciclo: en una tarjeta, lo que "
+            "debía al corte; en un préstamo, su parcialidad. Los traspasos que "
+            "hagas a esa cuenta dentro del ciclo la van descontando."
+        )
+
+        if exigibles.empty:
+            st.caption("No tienes cuentas de deuda en el catálogo.")
+        else:
+            st.dataframe(
+                exigibles,
+                hide_index=True,
+                column_config={
+                    "cuenta_id": None,
+                    "institucion": None,
+                    "declarado_el": None,
+                    "dia_corte": None,
+                    "dia_pago": None,
+                    "pago_mensual": None,
+                    "cuenta": st.column_config.TextColumn("Cuenta", pinned=True),
+                    "tipo": st.column_config.TextColumn("Tipo"),
+                    "deuda": st.column_config.NumberColumn(
+                        "Deuda total", format="$%.2f"
+                    ),
+                    "exigible": st.column_config.NumberColumn(
+                        "Exigible", format="$%.2f"
+                    ),
+                    "fuente": st.column_config.TextColumn(
+                        "De dónde sale",
+                        help=(
+                            "Capturado: lo que pusiste a mano para este ciclo. "
+                            "Saldo al corte: lo que debía la tarjeta el día de "
+                            "corte. Parcialidad: el pago fijo del préstamo."
+                        ),
+                    ),
+                    "corte": st.column_config.DateColumn(
+                        "Ciclo desde", format="DD/MM/YYYY"
+                    ),
+                    "abonado": st.column_config.NumberColumn("Abonado", format="$%.2f"),
+                    "pendiente": st.column_config.NumberColumn(
+                        "Falta pagar", format="$%.2f"
+                    ),
+                    "fecha_limite": st.column_config.DateColumn(
+                        "Fecha límite", format="DD/MM/YYYY"
+                    ),
+                    "dias": st.column_config.NumberColumn(
+                        "Días", format="%d", help="Negativo: ya venció."
+                    ),
+                    "estado": st.column_config.TextColumn("Estado"),
+                    "nota": st.column_config.TextColumn("Nota", width="medium"),
+                },
+            )
+
+            opciones_deuda = {
+                fila.cuenta: int(fila.cuenta_id) for fila in exigibles.itertuples()
+            }
+            deuda_elegida = st.selectbox(
+                "Cuenta de deuda", list(opciones_deuda), key="exigible_cuenta"
+            )
+            deuda_id = opciones_deuda[deuda_elegida]
+            actual_deuda = exigibles[exigibles["cuenta_id"] == deuda_id].iloc[0]
+            es_tarjeta = actual_deuda["tipo"] == str(TipoCuenta.CREDITO)
+
+            # ── Días fijos ───────────────────────────────
+            st.markdown("**Días fijos**")
+            dias = st.columns(3)
+            with dias[0]:
+                dia_pago = st.number_input(
+                    "Día de pago",
+                    min_value=1,
+                    max_value=31,
+                    value=_entero(actual_deuda["dia_pago"]),
+                    step=1,
+                    key=f"dia_pago_{deuda_id}",
+                    help="El día del mes en que vence el pago.",
+                )
+            with dias[1]:
+                if es_tarjeta:
+                    dia_corte = st.number_input(
+                        "Día de corte",
+                        min_value=1,
+                        max_value=31,
+                        value=_entero(actual_deuda["dia_corte"]),
+                        step=1,
+                        key=f"dia_corte_{deuda_id}",
+                        help="Lo que debe la tarjeta ese día es lo que hay que pagar.",
+                    )
+                    pago_mensual = None
+                else:
+                    dia_corte = None
+                    pago_mensual = st.number_input(
+                        "Parcialidad",
+                        min_value=0.0,
+                        value=_numero(actual_deuda["pago_mensual"]),
+                        step=100.0,
+                        format="%.2f",
+                        key=f"parcialidad_{deuda_id}",
+                        help="Lo que pagas cada mes. Vacío: lo capturas tú.",
+                    )
+
+            with st.container(horizontal=True):
+                if st.button(
+                    "Guardar días", type="primary", icon=":material/event_repeat:"
+                ):
+                    if dia_pago is None or (es_tarjeta and dia_corte is None):
+                        st.warning(
+                            "Pon el día de pago"
+                            + (" y el de corte." if es_tarjeta else "."),
+                            icon=":material/info:",
+                        )
+                    else:
+                        try:
+                            servicios.patrimonio.fijar_calendario_deuda(
+                                deuda_id,
+                                dia_pago=dia_pago,
+                                dia_corte=dia_corte,
+                                pago_mensual=pago_mensual,
+                            )
+                        except ValueError as error:
+                            reportar_error(error)
+                        else:
+                            invalidar_datos()
+                            st.rerun()
+
+                if pd.notna(actual_deuda["dia_pago"]) and st.button(
+                    "Quitar días", icon=":material/event_busy:"
+                ):
+                    servicios.patrimonio.fijar_calendario_deuda(deuda_id, dia_pago=None)
+                    invalidar_datos()
+                    st.rerun()
+
+            if es_tarjeta:
+                st.caption(
+                    "Con compras a meses, lo que debía al corte incluye todo lo "
+                    "que falta de ellas y exagera el pago. Captura abajo el «pago "
+                    "para no generar intereses» del estado de cuenta: manda "
+                    "durante ese ciclo."
+                )
+
+            # ── Para el plan de pagos ────────────────────
+            st.markdown("**Si no alcanza para pagarla**")
+            regla = (
+                servicios.patrimonio.reglas_de_deudas()
+                .set_index("cuenta_id")
+                .loc[deuda_id]
+            )
+            reglas_columnas = st.columns(3)
+            with reglas_columnas[0]:
+                tasa_pct = st.number_input(
+                    "Tasa anual (%)",
+                    min_value=0.0,
+                    max_value=500.0,
+                    value=(
+                        float(regla["tasa_anual"]) * 100
+                        if pd.notna(regla["tasa_anual"])
+                        else 0.0
+                    ),
+                    step=1.0,
+                    format="%.2f",
+                    key=f"tasa_{deuda_id}",
+                    help=(
+                        "Lo que cobra al año por lo que dejas sin pagar; viene "
+                        "en el estado de cuenta. El plan paga primero la deuda "
+                        "más cara."
+                    ),
+                )
+            with reglas_columnas[1]:
+                tope = st.date_input(
+                    "Se puede posponer hasta",
+                    value=regla["posponer_hasta"]
+                    if pd.notna(regla["posponer_hasta"])
+                    else None,
+                    format="DD/MM/YYYY",
+                    key=f"tope_{deuda_id}",
+                    help=(
+                        "Hasta cuándo puedes dejarla sin pagar sin problema, "
+                        "como un adeudo que se liquida a fin de semestre. "
+                        "Vacío: una tarjeta se puede posponer a su costo; un "
+                        "préstamo sin tasa ni fecha, no."
+                    ),
+                )
+            with reglas_columnas[2]:
+                st.markdown("&nbsp;")
+                if st.button("Guardar reglas", icon=":material/rule:"):
+                    try:
+                        servicios.patrimonio.fijar_reglas_deuda(
+                            deuda_id,
+                            tasa_anual=tasa_pct / 100 if tasa_pct else None,
+                            posponer_hasta=tope,
+                        )
+                    except ValueError as error:
+                        reportar_error(error)
+                    else:
+                        invalidar_datos()
+                        st.rerun()
+
+            # ── Captura a mano ───────────────────────────
+            st.markdown("**Capturar a mano**")
+            st.caption(
+                "Manda sobre la estimación mientras siga siendo el mismo ciclo. "
+                "Sin días fijos, vale hasta que lo cambies."
+            )
+            columnas = st.columns(3)
+            capturado = actual_deuda["fuente"] == FUENTE_CAPTURADO
+            with columnas[0]:
+                monto_exigible = st.number_input(
+                    "Exigible",
+                    min_value=0.0,
+                    value=float(actual_deuda["exigible"]),
+                    step=100.0,
+                    format="%.2f",
+                    key=f"exigible_monto_{deuda_id}",
+                    help="Lo que ya hay que pagar, no la deuda total.",
+                )
+            with columnas[1]:
+                limite_exigible = st.date_input(
+                    "Fecha límite",
+                    value=actual_deuda["fecha_limite"],
+                    format="DD/MM/YYYY",
+                    key=f"exigible_limite_{deuda_id}",
+                )
+            with columnas[2]:
+                declarado_exigible = st.date_input(
+                    "Al día",
+                    value=(
+                        actual_deuda["corte"]
+                        if pd.notna(actual_deuda["corte"])
+                        else date.today()
+                    ),
+                    max_value=date.today(),
+                    format="DD/MM/YYYY",
+                    key=f"exigible_declarado_{deuda_id}",
+                    help=(
+                        "Desde cuándo vale esta cifra: los abonos de ese día en "
+                        "adelante la descuentan. Si la tomas del estado de "
+                        "cuenta, pon su fecha de corte."
+                    ),
+                )
+            nota_exigible = st.text_input(
+                "Nota",
+                value=str(actual_deuda["nota"] or ""),
+                placeholder="Parcialidad de octubre",
+                key=f"exigible_nota_{deuda_id}",
+            )
+
+            if monto_exigible > float(actual_deuda["deuda"]) + 0.005:
+                deuda_deducida = moneda(actual_deuda["deuda"], decimales=2)
+                st.caption(
+                    f"Es más que la deuda deducida ({deuda_deducida}). Puede "
+                    "faltar un saldo verificado; lo pendiente no pasará de la deuda."
+                )
+
+            with st.container(horizontal=True):
+                if st.button("Guardar exigible", icon=":material/save:"):
+                    try:
+                        servicios.patrimonio.fijar_exigible(
+                            deuda_id,
+                            monto_exigible,
+                            fecha_limite=limite_exigible,
+                            declarado_el=declarado_exigible,
+                            nota=nota_exigible,
+                        )
+                    except ValueError as error:
+                        reportar_error(error)
+                    else:
+                        invalidar_datos()
+                        st.success(
+                            f"Exigible de «{deuda_elegida}» guardado.",
+                            icon=":material/check:",
+                        )
+                        st.rerun()
+
+                if capturado and st.button(
+                    "Quitar lo capturado", icon=":material/delete:"
+                ):
+                    servicios.patrimonio.quitar_exigible(deuda_id)
+                    invalidar_datos()
+                    st.rerun()
+
     por_pagar = servicios.movimientos.por_pagar()
 
     if por_pagar.empty:

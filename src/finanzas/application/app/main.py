@@ -78,8 +78,13 @@ def main() -> None:
     )
     suscripciones = st.Page(
         PAGINAS_DIR / "suscripciones.py",
-        title="Suscripciones",
+        title="Gastos fijos",
         icon=":material/autorenew:",
+    )
+    pagos = st.Page(
+        PAGINAS_DIR / "pagos.py",
+        title="Pagos del mes",
+        icon=":material/event_upcoming:",
     )
     analisis = st.Page(
         PAGINAS_DIR / "analisis.py",
@@ -106,7 +111,7 @@ def main() -> None:
 
     navegacion = st.navigation(
         {
-            "Resumen": [dashboard, analisis],
+            "Resumen": [dashboard, pagos, analisis],
             "Captura": [movimientos, importar, presupuesto],
             "Planes": [metas, proyectos, deseos],
             "Balance": [patrimonio, suscripciones],

@@ -237,6 +237,9 @@ with cuentas_tab:
                 "lado": st.column_config.TextColumn("Lado del balance"),
                 "institucion": st.column_config.TextColumn("Institución"),
                 "activa": st.column_config.CheckboxColumn("Activa"),
+                "restringida": st.column_config.CheckboxColumn(
+                    "Restringida", help="No se puede usar hasta retirarla."
+                ),
             },
         )
 
@@ -293,6 +296,16 @@ with cuentas_tab:
             activa = st.checkbox(
                 "Activa", value=bool(actual["activa"]), key=f"cuenta_activa_{cuenta_id}"
             )
+            restringida = st.checkbox(
+                "Restringida: no se puede usar hasta retirarla",
+                value=bool(actual["restringida"]),
+                key=f"cuenta_restringida_{cuenta_id}",
+                help=(
+                    "Como un fondo de ahorro de la empresa. Su saldo no cuenta "
+                    "como disponible, y lo que entra en ella no cuenta como "
+                    "ingreso del mes en Pagos del mes."
+                ),
+            )
 
             acciones = st.columns(2)
 
@@ -307,6 +320,7 @@ with cuentas_tab:
                             nuevo_tipo,
                             nueva_institucion,
                             activa,
+                            restringida,
                         )
                     except ValueError as error:
                         reportar_error(error)

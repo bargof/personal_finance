@@ -7,7 +7,7 @@ import pandas as pd
 from finanzas.data.repositories.catalogos_repository import CatalogosRepository
 from finanzas.data.repositories.suscripciones_repository import SuscripcionesRepository
 from finanzas.domain.entities import Suscripcion
-from finanzas.domain.enums import FrecuenciaCobro, Necesidad
+from finanzas.domain.enums import ClaseCargo, FrecuenciaCobro, Necesidad
 
 # ═══════════════════════════════════════════════════════════
 # Suscripciones
@@ -47,9 +47,12 @@ class SuscripcionesService:
                 "activas": 0,
                 "ahorro_potencial_mensual": 0.0,
                 "candidatas": 0,
+                "suscripciones_mensual": 0.0,
+                "fijos_mensual": 0.0,
             }
 
         candidatas = df[df["candidato_a_cancelar"]]
+        es_suscripcion = df["clase"] == str(ClaseCargo.SUSCRIPCION)
 
         return {
             "costo_mensual": float(df["costo_mensual"].sum()),
@@ -57,6 +60,10 @@ class SuscripcionesService:
             "activas": int(len(df)),
             "ahorro_potencial_mensual": float(candidatas["costo_mensual"].sum()),
             "candidatas": int(len(candidatas)),
+            "suscripciones_mensual": float(
+                df.loc[es_suscripcion, "costo_mensual"].sum()
+            ),
+            "fijos_mensual": float(df.loc[~es_suscripcion, "costo_mensual"].sum()),
         }
 
     def proximos_cobros(self, dias: int = 30) -> pd.DataFrame:
@@ -83,6 +90,9 @@ class SuscripcionesService:
         renovacion_automatica: bool = True,
         necesidad: str = Necesidad.DESEO,
         notas: str = "",
+        clase: str = ClaseCargo.SUSCRIPCION,
+        posponible: bool = False,
+        posponer_hasta: date | None = None,
     ) -> int:
         """
         Da de alta una suscripción.
@@ -105,6 +115,9 @@ class SuscripcionesService:
             renovacion_automatica=renovacion_automatica,
             necesidad=Necesidad(necesidad),
             notas=notas,
+            clase=ClaseCargo(clase),
+            posponible=bool(posponible),
+            posponer_hasta=posponer_hasta if posponible else None,
         )
 
         return self._repo.crear(suscripcion)
@@ -131,6 +144,11 @@ class SuscripcionesService:
             necesidad=Necesidad(actual["necesidad"]),
             activa=bool(actual["activa"]),
             notas=actual["notas"],
+            clase=ClaseCargo(actual["clase"]),
+            posponible=bool(actual["posponible"]),
+            posponer_hasta=(
+                actual["posponer_hasta"] if pd.notna(actual["posponer_hasta"]) else None
+            ),
         )
 
         for campo, valor in campos.items():
@@ -138,6 +156,10 @@ class SuscripcionesService:
                 raise ValueError(f"La suscripción no tiene el campo «{campo}».")
             setattr(suscripcion, campo, valor)
 
+        suscripcion.clase = ClaseCargo(suscripcion.clase)
+        # Una fecha tope sólo tiene sentido en algo que se puede posponer.
+        if not suscripcion.posponible:
+            suscripcion.posponer_hasta = None
         suscripcion.servicio = _validar_servicio(suscripcion.servicio)
         suscripcion.costo_por_cobro = _validar_costo(suscripcion.costo_por_cobro)
         self._validar_clasificacion(

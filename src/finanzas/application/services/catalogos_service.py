@@ -46,6 +46,7 @@ class CatalogosService:
         df = self._repo.listar_cuentas(solo_activas=solo_activas)
         if not df.empty:
             df["lado"] = df["tipo"].map(lambda tipo: str(TipoCuenta(tipo).lado))
+            df["restringida"] = df["restringida"].astype(bool)
 
         return df
 
@@ -145,13 +146,22 @@ class CatalogosService:
         tipo: str,
         institucion: str,
         activa: bool,
+        restringida: bool | None = None,
     ) -> None:
-        """Actualiza una cuenta existente."""
+        """
+        Actualiza una cuenta existente.
+
+        Una cuenta restringida es dinero propio que no se puede usar hasta
+        retirarlo, como un fondo de ahorro de la empresa: no cuenta como
+        disponible ni lo que entra en ella como ingreso con el que pagar.
+        """
         nombre = _validar_nombre(nombre, "cuenta")
         tipo = _validar_tipo_cuenta(tipo)
 
         try:
-            self._repo.actualizar_cuenta(cuenta_id, nombre, tipo, institucion, activa)
+            self._repo.actualizar_cuenta(
+                cuenta_id, nombre, tipo, institucion, activa, restringida
+            )
         except sqlite3.IntegrityError as error:
             raise NombreDuplicadoError(
                 f"Ya existe una cuenta llamada «{nombre}»."

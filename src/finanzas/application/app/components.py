@@ -20,6 +20,7 @@ from finanzas.application.services.catalogos_service import CatalogosService
 from finanzas.application.services.deseos_service import DeseosService
 from finanzas.application.services.metas_service import MetasService
 from finanzas.application.services.movimientos_service import MovimientosService
+from finanzas.application.services.pagos_service import PagosService
 from finanzas.application.services.patrimonio_service import PatrimonioService
 from finanzas.application.services.presupuesto_service import PresupuestoService
 from finanzas.application.services.productos_service import ProductosService
@@ -54,6 +55,10 @@ def estado_color(estado: str) -> str:
         "Ajustar aportación": p.atencion,
         "Vencida": p.error,
         "Lograda": p.exito,
+        "Pagado": p.exito,
+        "Por pagar": p.neutro,
+        "Vence hoy": p.atencion,
+        "Vencido": p.error,
     }
 
     return colores.get(estado, p.neutro)
@@ -70,6 +75,10 @@ ESTADO_ICONO = {
     "Ajustar aportación": ":material/warning:",
     "Vencida": ":material/error:",
     "Lograda": ":material/verified:",
+    "Pagado": ":material/check_circle:",
+    "Por pagar": ":material/schedule:",
+    "Vence hoy": ":material/warning:",
+    "Vencido": ":material/error:",
 }
 
 ALTURA_GRAFICO = 280
@@ -89,6 +98,7 @@ class Servicios:
     proyectos: ProyectosService
     deseos: DeseosService
     productos: ProductosService
+    pagos: PagosService
 
 
 @st.cache_resource
@@ -110,6 +120,7 @@ def obtener_servicios() -> Servicios:
         proyectos=ProyectosService(),
         deseos=DeseosService(),
         productos=ProductosService(),
+        pagos=PagosService(),
     )
 
 
@@ -428,6 +439,92 @@ def grafico_patrimonio(cierres: pd.DataFrame) -> alt.Chart:
             ],
         )
         .properties(height=ALTURA_GRAFICO)
+    )
+
+
+def grafico_saldo_proyectado(flujo: pd.DataFrame) -> alt.Chart:
+    """
+    El saldo día a día según el plan: una sola serie, sin leyenda.
+
+    Va en escalón porque el saldo no se desliza entre dos fechas: cambia
+    el día que algo entra o sale. El cero es una regla del eje, no una
+    serie; los días que quedan por debajo se marcan con el color de error
+    y lo dicen también el tooltip y la tabla, así que nunca es sólo el
+    color. La única etiqueta directa es el cierre, que es la cifra que
+    importa.
+    """
+    p = tema.paleta()
+
+    # Un punto por día, con lo que se movió ese día, para el tooltip.
+    por_dia = (
+        flujo.assign(movimiento=flujo["concepto"])
+        .groupby("fecha", as_index=False)
+        .agg(
+            entra=("entra", "sum"),
+            sale=("sale", "sum"),
+            saldo=("saldo", "last"),
+            movimiento=("movimiento", lambda c: " · ".join(c)),
+        )
+    )
+    por_dia["fecha"] = pd.to_datetime(por_dia["fecha"])
+    por_dia["negativo"] = por_dia["saldo"] < 0
+
+    base = alt.Chart(por_dia).encode(
+        x=alt.X(
+            "fecha:T",
+            title=None,
+            axis=alt.Axis(format="%d %b", labelOverlap=True, grid=False),
+        )
+    )
+    cursor = alt.selection_point(
+        fields=["fecha"], nearest=True, on="pointerover", empty=False
+    )
+
+    linea = base.mark_line(
+        interpolate="step-after", strokeWidth=2, color=p.serie_1
+    ).encode(y=alt.Y("saldo:Q", title=None, axis=alt.Axis(format=",.0f")))
+    cero = (
+        alt.Chart(pd.DataFrame({"y": [0]}))
+        .mark_rule(color=p.eje, strokeWidth=1)
+        .encode(y="y:Q")
+    )
+    rojos = (
+        base.transform_filter(alt.datum.negativo)
+        .mark_point(size=64, filled=True, color=p.error, opacity=1)
+        .encode(y="saldo:Q")
+    )
+    tooltip = [
+        alt.Tooltip("fecha:T", title="Día", format="%d/%m/%Y"),
+        alt.Tooltip("saldo:Q", title="Saldo al cerrar el día", format=",.2f"),
+        alt.Tooltip("entra:Q", title="Entra", format=",.2f"),
+        alt.Tooltip("sale:Q", title="Sale", format=",.2f"),
+        alt.Tooltip("movimiento:N", title="Qué"),
+    ]
+    # Blancos más grandes que la marca: se atina con el cursor sin tener
+    # que caer justo en la línea.
+    blanco = (
+        base.mark_point(size=400, opacity=0)
+        .encode(y="saldo:Q", tooltip=tooltip)
+        .add_params(cursor)
+    )
+    regla = base.mark_rule(color=p.texto_tenue, strokeWidth=1).encode(
+        opacity=alt.condition(cursor, alt.value(0.6), alt.value(0))
+    )
+    foco = base.mark_point(size=90, filled=True, color=p.serie_1).encode(
+        y="saldo:Q",
+        opacity=alt.condition(cursor, alt.value(1), alt.value(0)),
+    )
+    cierre = (
+        base.transform_window(
+            orden="rank()", sort=[alt.SortField("fecha", "descending")]
+        )
+        .transform_filter(alt.datum.orden == 1)
+        .mark_text(align="right", dx=-6, dy=-12, fontWeight="bold")
+        .encode(y="saldo:Q", text=alt.Text("saldo:Q", format="$,.0f"))
+    )
+
+    return (cero + linea + rojos + regla + foco + blanco + cierre).properties(
+        height=ALTURA_GRAFICO
     )
 
 

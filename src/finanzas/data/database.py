@@ -53,7 +53,72 @@ CREATE TABLE IF NOT EXISTS cuentas (
                 CHECK (tipo IN ('Efectivo', 'Débito', 'Ahorro', 'Inversión',
                                 'Vales', 'Crédito', 'Préstamo', 'Otro')),
     institucion TEXT    NOT NULL DEFAULT '',
-    activa      INTEGER NOT NULL DEFAULT 1 CHECK (activa IN (0, 1))
+    activa      INTEGER NOT NULL DEFAULT 1 CHECK (activa IN (0, 1)),
+    -- Sólo en las de deuda. Una tarjeta corta un día y se paga otro,
+    -- siempre los mismos; un préstamo se paga un día fijo, a veces por
+    -- una parcialidad fija. De ahí sale lo exigible de cada ciclo.
+    dia_corte    INTEGER CHECK (dia_corte BETWEEN 1 AND 31),
+    dia_pago     INTEGER CHECK (dia_pago BETWEEN 1 AND 31),
+    pago_mensual REAL    CHECK (pago_mensual >= 0),
+    -- Dinero que es tuyo pero no puedes usar hasta retirarlo: un fondo
+    -- de ahorro de la empresa. No cuenta como disponible, y lo que entra
+    -- ahí no es ingreso con el que pagar.
+    restringida  INTEGER NOT NULL DEFAULT 0 CHECK (restringida IN (0, 1)),
+    -- Para planear qué pagar primero cuando no alcanza: lo que cuesta
+    -- dejar de pagar una deuda (su tasa) y hasta cuándo se puede dejar
+    -- sin pagar sin problema (un adeudo que se liquida a fin de semestre).
+    tasa_anual     REAL CHECK (tasa_anual >= 0),
+    posponer_hasta TEXT
+);
+
+-- Las decisiones del plan de pagos que el usuario tomó a mano, por mes.
+-- Lo que no está aquí lo decide la sugerencia. `clave` identifica el
+-- concepto dentro del mes («exigible:16», «fijo:6:2026-10-01»).
+-- Ingresos que sólo existen en el plan, para ver qué pasaría: retirar
+-- del fondo de ahorro en un mes. `cuenta_id` es la cuenta restringida de
+-- la que saldría.
+CREATE TABLE IF NOT EXISTS plan_retiros (
+    mes       TEXT    NOT NULL,
+    cuenta_id INTEGER NOT NULL REFERENCES cuentas(id) ON DELETE CASCADE,
+    monto     REAL    NOT NULL CHECK (monto > 0),
+    PRIMARY KEY (mes, cuenta_id)
+);
+
+-- Lo que el plan supone que va a pasar y todavía no pasa: un ingreso
+-- (el aguinaldo) o una aportación a un fondo (la de cada mes al fondo de
+-- ahorro). Sin `mes`, se repite cada mes. Una aportación va a
+-- `cuenta_id` —el fondo— y no es dinero para pagar; un ingreso, sí.
+CREATE TABLE IF NOT EXISTS plan_simulados (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    tipo      TEXT    NOT NULL CHECK (tipo IN ('ingreso', 'aportacion')),
+    concepto  TEXT    NOT NULL,
+    monto     REAL    NOT NULL CHECK (monto > 0),
+    dia       INTEGER NOT NULL CHECK (dia BETWEEN 1 AND 31),
+    mes       TEXT,
+    cuenta_id INTEGER REFERENCES cuentas(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS plan_pagos (
+    mes      TEXT NOT NULL,
+    clave    TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK (decision IN ('pagar', 'parcial', 'posponer')),
+    monto    REAL,
+    PRIMARY KEY (mes, clave)
+);
+
+-- Lo que entra cada mes aunque todavía no se registre: la nómina en sus
+-- quincenas. Se muestra siempre; cuando llega el movimiento que la paga,
+-- manda el monto real. `texto` reconoce ese movimiento por su descripción
+-- o su concepto del banco.
+CREATE TABLE IF NOT EXISTS ingresos_fijos (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    concepto     TEXT    NOT NULL,
+    monto        REAL    NOT NULL CHECK (monto >= 0),
+    dia          INTEGER NOT NULL CHECK (dia BETWEEN 1 AND 31),
+    categoria_id INTEGER REFERENCES categorias(id) ON DELETE SET NULL,
+    cuenta_id    INTEGER REFERENCES cuentas(id) ON DELETE SET NULL,
+    texto        TEXT    NOT NULL DEFAULT '',
+    activo       INTEGER NOT NULL DEFAULT 1 CHECK (activo IN (0, 1))
 );
 
 -- ── Saldos verificados ───────────────────────────────────
@@ -76,6 +141,21 @@ CREATE TABLE IF NOT EXISTS saldos_verificados (
     nota      TEXT    NOT NULL DEFAULT '',
     creado_en TEXT    NOT NULL DEFAULT (datetime('now')),
     UNIQUE (cuenta_id, fecha)
+);
+
+-- Lo que de una deuda ya es exigible: la parcialidad vencida de un
+-- préstamo, el pago para no generar intereses de una tarjeta. El saldo
+-- de la cuenta dice cuánto se debe en total; esto, cuánto hay que pagar
+-- ya. Uno por cuenta: capturarlo otra vez lo corrige. Los abonos a la
+-- cuenta desde `declarado_el` lo van descontando sin tocarlo.
+CREATE TABLE IF NOT EXISTS exigibles (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    cuenta_id    INTEGER NOT NULL UNIQUE REFERENCES cuentas(id) ON DELETE CASCADE,
+    monto        REAL    NOT NULL CHECK (monto >= 0),
+    declarado_el TEXT    NOT NULL,
+    fecha_limite TEXT,
+    nota         TEXT    NOT NULL DEFAULT '',
+    creado_en    TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS medios_pago (
@@ -246,7 +326,17 @@ CREATE TABLE IF NOT EXISTS suscripciones (
     necesidad             TEXT    NOT NULL DEFAULT 'Deseo'
                           CHECK (necesidad IN ('Esencial', 'Deseo')),
     activa                INTEGER NOT NULL DEFAULT 1 CHECK (activa IN (0, 1)),
-    notas                 TEXT    NOT NULL DEFAULT ''
+    notas                 TEXT    NOT NULL DEFAULT '',
+    -- Si se puede dejar para el mes siguiente cuando no alcanza. La
+    -- renta, no.
+    posponible            INTEGER NOT NULL DEFAULT 0 CHECK (posponible IN (0, 1)),
+    -- Hasta cuándo se puede posponer; vacío, sin límite. En ese mes ya
+    -- hay que pagar todo lo que se haya ido dejando.
+    posponer_hasta        TEXT,
+    -- Una suscripción se puede cancelar; la renta o el celular, no. Los
+    -- dos son cargos fijos con fecha, y viven juntos para verlos en el
+    -- calendario de pagos; la clase los separa donde importa.
+    clase                 TEXT    NOT NULL DEFAULT 'Suscripción'
 );
 
 -- ── Proyectos ────────────────────────────────────────────
@@ -748,6 +838,23 @@ _COLUMNAS_NUEVAS: tuple[tuple[str, str, str], ...] = (
     ("movimientos", "lugar", "TEXT NOT NULL DEFAULT ''"),
     ("movimientos", "hora", "TEXT"),
     ("movimientos", "fecha_banco", "TEXT"),
+    ("suscripciones", "clase", "TEXT NOT NULL DEFAULT 'Suscripción'"),
+    ("cuentas", "dia_corte", "INTEGER CHECK (dia_corte BETWEEN 1 AND 31)"),
+    ("cuentas", "dia_pago", "INTEGER CHECK (dia_pago BETWEEN 1 AND 31)"),
+    ("cuentas", "pago_mensual", "REAL CHECK (pago_mensual >= 0)"),
+    (
+        "cuentas",
+        "restringida",
+        "INTEGER NOT NULL DEFAULT 0 CHECK (restringida IN (0, 1))",
+    ),
+    ("cuentas", "tasa_anual", "REAL CHECK (tasa_anual >= 0)"),
+    ("cuentas", "posponer_hasta", "TEXT"),
+    (
+        "suscripciones",
+        "posponible",
+        "INTEGER NOT NULL DEFAULT 0 CHECK (posponible IN (0, 1))",
+    ),
+    ("suscripciones", "posponer_hasta", "TEXT"),
 )
 
 #: Columnas que cambiaron de nombre porque cambiaron de significado.

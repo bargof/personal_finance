@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from datetime import date
+
 import streamlit as st
 
+from finanzas.application.app.cifras_del_mes import cifras_del_mes, nombre_mes
 from finanzas.application.app.components import (
     grafico_barras,
     grafico_tendencia,
@@ -47,6 +50,14 @@ else:
 # Los saldos no se capturan, se deducen; el detalle de cada uno —de qué
 # saldo verificado sale, cuántos movimientos median— vive en Patrimonio.
 
+# ── Este mes: las mismas cifras que Pagos del mes ────────
+#
+# Son el mismo componente que dibuja esa página, no una copia: así el
+# «Por pagar» de aquí y el de allá no pueden decir cosas distintas.
+
+rotulo(f"Este mes · {nombre_mes(date.today())}")
+cifras_del_mes(date.today(), clave="dashboard")
+
 rotulo("Tus cuentas hoy")
 
 saldos = servicios.patrimonio.saldos()
@@ -87,29 +98,6 @@ else:
         float(debes["saldo_visto"].clip(lower=0).sum()) if not debes.empty else 0.0
     )
 
-    with st.container(horizontal=True):
-        st.metric(
-            "Disponible",
-            moneda(servicios.patrimonio.activos_liquidos(), simbolo),
-            border=True,
-            height=ALTO_TARJETA,
-            help="Efectivo, débito y ahorro: lo que puedes usar hoy mismo.",
-        )
-        st.metric(
-            "Deuda en cuentas",
-            moneda(deuda_en_cuentas, simbolo),
-            border=True,
-            height=ALTO_TARJETA,
-            help="Lo que deben tus tarjetas y préstamos.",
-        )
-        st.metric(
-            "Por pagar",
-            moneda(servicios.movimientos.total_por_pagar(), simbolo),
-            border=True,
-            height=ALTO_TARJETA,
-            help="Gasto ya hecho que todavía no sale de ninguna cuenta.",
-        )
-
     if not tienes.empty:
         with st.container(horizontal=True):
             for fila in tienes.sort_values("saldo", ascending=False).itertuples():
@@ -119,8 +107,10 @@ else:
                 )
                 if not fila.verificado:
                     pista += " · sin saldo verificado: se suma desde cero"
+                if fila.restringida:
+                    pista += " · restringida: no cuenta como disponible"
                 st.metric(
-                    fila.cuenta,
+                    fila.cuenta + (" 🔒" if fila.restringida else ""),
                     moneda(fila.saldo_visto, simbolo),
                     delta=f"{neto:+,.0f}" if neto else None,
                     border=True,
@@ -131,6 +121,17 @@ else:
 
     if not debes.empty:
         with st.container(horizontal=True):
+            st.metric(
+                "Deuda total",
+                moneda(deuda_en_cuentas, simbolo),
+                border=True,
+                width=ANCHO_TARJETA,
+                height=ALTO_TARJETA,
+                help=(
+                    "Todo lo que deben tus tarjetas y préstamos, venza cuando "
+                    "venza. Lo que ya toca pagar está en «Por pagar», arriba."
+                ),
+            )
             for fila in debes.sort_values("saldo").itertuples():
                 # En una deuda la tarjeta enseña lo que debes, así que el
                 # delta es cuánto subió o bajó eso: entrar dinero a la
@@ -189,6 +190,12 @@ with st.container(horizontal=True):
         "Ingresos",
         moneda(resumen.ingresos, simbolo),
         border=True,
+        help=(
+            "Todo lo registrado como ingreso en el periodo, también lo que entró "
+            "a cuentas restringidas. No es el «Ingreso del mes» de arriba, que "
+            "cuenta la nómina aunque no esté registrada y deja fuera lo "
+            "restringido."
+        ),
         chart_data=serie_ingresos,
         chart_type="line",
     )

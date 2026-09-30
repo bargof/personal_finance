@@ -134,10 +134,27 @@ class Candidato:
     #: en vez de duplicar.
     guardados: list[int] = field(default_factory=list)
 
+    #: El movimiento capturado a mano que esta línea del banco parece ser,
+    #: cuando ese movimiento aún no tiene datos del banco. Completarlo le
+    #: pone el concepto, el folio y la fecha del banco en vez de importar
+    #: la línea otra vez. Es una tercera salida, aparte de `incluir`: una
+    #: línea es un movimiento nuevo o el que ya estaba, nunca las dos.
+    vinculo_id: int | None = None
+    vinculo_resumen: str = ""
+    completar: bool = False
+    #: Lo que tenía el movimiento antes de completarlo, para deshacerlo.
+    #: None mientras no se haya aplicado.
+    vinculo_antes: dict | None = None
+
     @property
     def ya_guardado(self) -> bool:
         """Indica si el candidato ya se escribió en la base."""
         return bool(self.guardados)
+
+    @property
+    def completado(self) -> bool:
+        """Indica si ya se completó con él un movimiento registrado."""
+        return self.vinculo_antes is not None
 
     @property
     def tipo_sugerido(self) -> str:
@@ -243,6 +260,16 @@ class ResultadoImportacion:
         """Los marcados para guardar."""
         return [c for c in self.candidatos if c.incluir]
 
+    @property
+    def vinculables(self) -> list[Candidato]:
+        """Los que pueden completar un movimiento capturado a mano."""
+        return [c for c in self.candidatos if c.vinculo_id is not None]
+
+    @property
+    def a_completar(self) -> list[Candidato]:
+        """Los marcados para completar su movimiento, y no para importarse."""
+        return [c for c in self.vinculables if c.completar and not c.incluir]
+
 
 class ImportacionService:
     """Lee estados de cuenta y prepara sus movimientos para revisión."""
@@ -300,17 +327,21 @@ class ImportacionService:
         Se vuelve a llamar si el usuario cambia la cuenta del documento:
         la misma cifra en otra cuenta no es el mismo movimiento, y un
         traspaso ya registrado sólo es «la otra pata» si esta cuenta es
-        uno de sus dos extremos. Lo ya guardado no se toca.
+        uno de sus dos extremos. Lo ya guardado o completado no se toca.
         """
-        for candidato in resultado.candidatos:
-            if candidato.ya_guardado:
-                continue
+        vigentes = [
+            c for c in resultado.candidatos if not (c.ya_guardado or c.completado)
+        ]
+        for candidato in vigentes:
             candidato.estado = NUEVO
             candidato.motivo = ""
             candidato.incluir = True
+            candidato.vinculo_id = None
+            candidato.vinculo_resumen = ""
+            candidato.completar = False
 
         self._marcar_duplicados(
-            [c for c in resultado.candidatos if not c.ya_guardado],
+            vigentes,
             resultado.lectura,
             resultado.cuenta_id,
         )
@@ -380,6 +411,7 @@ class ImportacionService:
                 candidato.motivo = _motivo_duplicado(
                     candidato, registrados.loc[indice], exacto=True
                 )
+                _proponer_vinculo(candidato, registrados, usados, indice, cuenta_id)
                 continue
 
             indice = self._buscar(candidato, registrados, usados, cuenta_id, False)
@@ -390,6 +422,7 @@ class ImportacionService:
                 candidato.motivo = _motivo_duplicado(
                     candidato, registrados.loc[indice], exacto=False
                 )
+                _proponer_vinculo(candidato, registrados, usados, indice, cuenta_id)
                 continue
 
             # La misma cifra en la misma fecha pero en otra cuenta: casi
@@ -647,6 +680,58 @@ class ImportacionService:
             self._repo.eliminar_muchos(candidato.guardados)
             candidato.guardados = []
 
+    def aplicar_vinculos(self, resultado: ResultadoImportacion) -> int:
+        """
+        Deja cada movimiento capturado a mano como dice su casilla.
+
+        Completa los marcados que aún no se completaron y deshace los que
+        se desmarcaron después de completarlos, igual que desmarcar un
+        importado lo borra. Una línea marcada también para importarse no
+        se completa: sería contar el mismo dinero dos veces.
+
+        Returns
+        -------
+        int
+            Cuántos movimientos quedan completados con este documento.
+        """
+        for candidato in resultado.vinculables:
+            quiere = candidato.completar and not candidato.incluir
+            origen = candidato.origen
+
+            if quiere and not candidato.completado:
+                antes = self._repo.completar_con_banco(
+                    candidato.vinculo_id,
+                    descripcion_banco=origen.descripcion_banco,
+                    referencia_externa=origen.referencia,
+                    fecha_banco=origen.fecha,
+                    fecha_pago=origen.fecha_cargo or origen.fecha,
+                )
+                if antes is None:
+                    # Entre leer y aplicar, el movimiento recibió datos del
+                    # banco por otro lado: ya no es nuestro para completar.
+                    candidato.completar = False
+                    candidato.motivo += " Ya tenía datos del banco; no se tocó."
+                else:
+                    candidato.vinculo_antes = antes
+
+            elif not quiere and candidato.completado:
+                self._repo.deshacer_completado(
+                    candidato.vinculo_id,
+                    origen.descripcion_banco,
+                    origen.referencia,
+                    candidato.vinculo_antes,
+                )
+                candidato.vinculo_antes = None
+
+        completados = sum(1 for c in resultado.candidatos if c.completado)
+        if completados:
+            logger.info(
+                "Completados %s movimientos con datos de %s",
+                completados,
+                resultado.lectura.banco,
+            )
+        return completados
+
     def guardar(
         self, candidatos: list[Candidato], cuenta_id: int, pagado: bool = True
     ) -> int:
@@ -836,6 +921,10 @@ def serializar(resultado: ResultadoImportacion) -> str:
                     "planeado": c.planeado,
                     "estado_movimiento": c.estado_movimiento,
                     "cuenta_destino_id": c.cuenta_destino_id,
+                    "vinculo_id": c.vinculo_id,
+                    "vinculo_resumen": c.vinculo_resumen,
+                    "completar": c.completar,
+                    "vinculo_antes": c.vinculo_antes,
                     "productos": [
                         {
                             "producto": p.producto,
@@ -909,6 +998,10 @@ def deserializar(crudo: str) -> ResultadoImportacion:
                     "estado_movimiento", "Confirmado"
                 ),
                 cuenta_destino_id=crudo_candidato.get("cuenta_destino_id"),
+                vinculo_id=crudo_candidato.get("vinculo_id"),
+                vinculo_resumen=crudo_candidato.get("vinculo_resumen", ""),
+                completar=crudo_candidato.get("completar", False),
+                vinculo_antes=crudo_candidato.get("vinculo_antes"),
                 productos=[Producto(**p) for p in crudo_candidato.get("productos", [])],
             )
         )
@@ -936,6 +1029,86 @@ def _toca_la_cuenta(fila: pd.Series, cuenta_id: int, es_cargo: bool) -> bool:
     if es_ingreso:
         return origen == cuenta_id
     return destino == cuenta_id
+
+
+def _sin_datos_del_banco(fila: pd.Series) -> bool:
+    """Indica si un movimiento registrado se capturó a mano, sin banco."""
+    return (
+        not str(fila.get("descripcion_banco") or "").strip()
+        and not str(fila.get("referencia_externa") or "").strip()
+    )
+
+
+def _distancia(fila: pd.Series, fecha: date) -> int:
+    """
+    Días entre lo registrado y la fecha del banco.
+
+    Se mide contra la fecha capturada y contra `fecha_banco`, y cuenta la
+    menor: en lo capturado a mano `fecha_banco` es una suposición (el día
+    siguiente), y la fecha que el usuario escribió puede estar más cerca.
+    """
+    distancias = [abs((fila["fecha"].date() - fecha).days)]
+    banco = fila.get("fecha_banco")
+    if banco is not None and not pd.isna(banco):
+        distancias.append(abs((banco.date() - fecha).days))
+    return min(distancias)
+
+
+def _proponer_vinculo(
+    candidato: Candidato,
+    registrados: pd.DataFrame,
+    usados: set[int],
+    indice: int,
+    cuenta_id: int | None,
+) -> None:
+    """
+    Propone completar con esta línea el movimiento con que se emparejó.
+
+    Sólo si no hay duda de cuál es: el movimiento se capturó a mano (sin
+    datos del banco; si los tiene, es un duplicado de verdad y no se
+    toca), es un gasto o un ingreso (un traspaso sale en dos estados de
+    cuenta y tiene un solo folio), la cuenta del documento es conocida y
+    no hay otro capturado a mano igual de cercano con el que confundirlo.
+    Dos iguales —mismo monto, misma descripción— son intercambiables y
+    no cuentan como duda.
+    """
+    if cuenta_id is None:
+        return
+
+    fila = registrados.loc[indice]
+    if not _sin_datos_del_banco(fila):
+        return
+    if fila["tipo"] not in (str(TipoMovimiento.GASTO), str(TipoMovimiento.INGRESO)):
+        return
+
+    fecha = candidato.origen.fecha
+    monto = round(candidato.origen.monto, 2)
+    distancia = _distancia(fila, fecha)
+    for otro, alterna in registrados.iterrows():
+        if otro in usados or abs(round(alterna["monto"], 2) - monto) >= 0.005:
+            continue
+        if not _sin_datos_del_banco(alterna):
+            continue
+        if not _toca_la_cuenta(alterna, cuenta_id, candidato.origen.es_cargo):
+            continue
+        if (
+            _distancia(alterna, fecha) <= distancia
+            and alterna["descripcion"] != fila["descripcion"]
+        ):
+            candidato.motivo += (
+                " Hay otro capturado a mano igual de cercano; no adivino cuál "
+                "completar."
+            )
+            return
+
+    candidato.vinculo_id = int(fila["id"])
+    candidato.vinculo_resumen = (
+        f"#{int(fila['id'])} · {fila['fecha']:%d/%m/%Y} · {fila['descripcion']}"
+    )
+    # Viene marcado aunque sea sólo un posible: se revisa en su propia
+    # sección, y desmarcarlo deja la línea como hoy, ignorada.
+    candidato.completar = True
+    candidato.motivo += " Lo capturaste a mano: puedo completarlo con el banco."
 
 
 def _motivo_duplicado(candidato: Candidato, fila: pd.Series, exacto: bool) -> str:

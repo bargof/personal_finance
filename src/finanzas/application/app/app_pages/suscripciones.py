@@ -13,10 +13,15 @@ from finanzas.application.app.components import (
     reportar_error,
     tabla_equivalente,
 )
-from finanzas.domain.enums import FrecuenciaCobro, Necesidad
+from finanzas.domain.enums import ClaseCargo, FrecuenciaCobro, Necesidad
 
 # ═══════════════════════════════════════════════════════════
-# Suscripciones: el gasto que se renueva solo
+# Gastos fijos: lo que se cobra solo o que toca pagar cada mes
+#
+# Suscripciones y gastos fijos —la renta, el celular— viven en
+# el mismo catálogo porque los dos tienen monto y fecha, y los
+# dos entran al calendario de «Pagos del mes». Una suscripción
+# se puede cancelar; un gasto fijo, no: la clase los separa.
 #
 # Todo se normaliza a costo mensual, que es lo único que
 # permite comparar un cobro anual con uno mensual.
@@ -26,28 +31,39 @@ servicios = obtener_servicios()
 suscripciones = servicios.suscripciones.listar()
 resumen = servicios.suscripciones.resumen()
 
-st.title("Suscripciones")
+st.title("Gastos fijos")
 st.caption(
-    "El costo mensual normaliza cualquier frecuencia de cobro, para que un "
-    "servicio anual y uno mensual se puedan comparar."
+    "Lo que se cobra solo o toca pagar cada tanto: suscripciones y gastos "
+    "fijos como la renta o el celular. Con su próximo cobro, cada uno aparece "
+    "en **Pagos del mes** con su fecha y si ya lo pagaste. El costo mensual "
+    "normaliza cualquier frecuencia, para comparar un cobro anual con uno "
+    "mensual."
 )
 
 with st.container(horizontal=True):
     st.metric("Costo mensual", moneda(resumen["costo_mensual"]), border=True)
-    st.metric("Costo anual", moneda(resumen["costo_anual"]), border=True)
-    st.metric("Activas", resumen["activas"], border=True)
+    st.metric("Gastos fijos al mes", moneda(resumen["fijos_mensual"]), border=True)
+    st.metric(
+        "Suscripciones al mes",
+        moneda(resumen["suscripciones_mensual"]),
+        border=True,
+    )
+    st.metric("Activos", resumen["activas"], border=True)
     st.metric(
         "Ahorro potencial",
         moneda(resumen["ahorro_potencial_mensual"]),
         delta=f"{resumen['candidatas']} candidatas a cancelar",
         delta_color="off",
         border=True,
-        help="Suscripciones activas, discrecionales y con renovación automática.",
+        help=(
+            "Suscripciones activas, discrecionales y con renovación "
+            "automática. Los gastos fijos no cuentan: no se cancelan."
+        ),
     )
 
 if suscripciones.empty:
     st.info(
-        "Aún no hay suscripciones registradas. Agrega la primera abajo.",
+        "Aún no hay gastos fijos ni suscripciones. Agrega el primero abajo.",
         icon=":material/info:",
     )
 else:
@@ -62,7 +78,7 @@ else:
         )
 
     with st.container(border=True):
-        st.subheader("Tus suscripciones")
+        st.subheader("Tus cargos fijos")
         st.dataframe(
             suscripciones,
             hide_index=True,
@@ -71,7 +87,8 @@ else:
                 "categoria_id": None,
                 "subcategoria_id": None,
                 "cuenta_id": None,
-                "servicio": st.column_config.TextColumn("Servicio", pinned=True),
+                "servicio": st.column_config.TextColumn("Concepto", pinned=True),
+                "clase": st.column_config.TextColumn("Clase"),
                 "categoria": st.column_config.TextColumn("Categoría"),
                 "subcategoria": st.column_config.TextColumn("Subcategoría"),
                 "costo_por_cobro": st.column_config.NumberColumn(
@@ -95,6 +112,10 @@ else:
                 "activa": st.column_config.CheckboxColumn("Activa"),
                 "candidato_a_cancelar": st.column_config.CheckboxColumn("Revisar"),
                 "notas": st.column_config.TextColumn("Notas", width="medium"),
+                "posponible": st.column_config.CheckboxColumn("Posponible"),
+                "posponer_hasta": st.column_config.DateColumn(
+                    "Hasta", format="DD/MM/YYYY"
+                ),
             },
         )
 
@@ -107,14 +128,14 @@ else:
                     activas,
                     dimension="servicio",
                     medida="costo_mensual",
-                    titulo_dimension="Servicio",
+                    titulo_dimension="Concepto",
                     titulo_medida="Costo mensual",
                 )
             )
             tabla_equivalente(
                 activas[["servicio", "costo_mensual", "costo_anual"]].rename(
                     columns={
-                        "servicio": "Servicio",
+                        "servicio": "Concepto",
                         "costo_mensual": "Costo mensual",
                         "costo_anual": "Costo anual",
                     }
@@ -124,12 +145,20 @@ else:
     # ── Gestionar ────────────────────────────────────────
 
     with st.container(border=True):
-        st.subheader("Gestionar una suscripción")
+        st.subheader("Gestionar un cargo")
 
         opciones = {fila.servicio: int(fila.id) for fila in suscripciones.itertuples()}
-        elegida = st.selectbox("Suscripción", list(opciones))
+        elegida = st.selectbox("Cargo", list(opciones))
         suscripcion_id = opciones[elegida]
         actual = suscripciones[suscripciones["id"] == suscripcion_id].iloc[0]
+
+        clases = [str(valor) for valor in ClaseCargo]
+        nueva_clase = st.segmented_control(
+            "Clase",
+            clases,
+            default=actual["clase"],
+            key=f"clase_{suscripcion_id}",
+        )
 
         columnas = st.columns([1, 1, 1, 1])
 
@@ -162,6 +191,27 @@ else:
 
         with columnas[3]:
             sigue_activa = st.checkbox("Activa", value=bool(actual["activa"]))
+            sigue_posponible = st.checkbox(
+                "Se puede posponer",
+                value=bool(actual["posponible"]),
+                key=f"posponible_{suscripcion_id}",
+                help="Si no alcanza, el plan de pagos lo deja para el mes siguiente.",
+            )
+            tope_actual = actual["posponer_hasta"]
+            nuevo_tope = (
+                st.date_input(
+                    "Hasta",
+                    value=tope_actual if pd.notna(tope_actual) else None,
+                    format="DD/MM/YYYY",
+                    key=f"posponer_hasta_{suscripcion_id}",
+                    help=(
+                        "En ese mes ya hay que pagar todo lo que se haya ido "
+                        "dejando. Vacío: sin límite."
+                    ),
+                )
+                if sigue_posponible
+                else None
+            )
 
         acciones = st.columns(3)
 
@@ -174,12 +224,15 @@ else:
                         frecuencia=FrecuenciaCobro(nueva_frecuencia),
                         proximo_cobro=nuevo_cobro,
                         activa=sigue_activa,
+                        posponible=sigue_posponible,
+                        posponer_hasta=nuevo_tope,
+                        clase=ClaseCargo(nueva_clase or actual["clase"]),
                     )
                 except ValueError as error:
                     reportar_error(error)
                 else:
                     invalidar_datos()
-                    st.success("Suscripción actualizada.", icon=":material/check:")
+                    st.success("Cargo actualizado.", icon=":material/check:")
                     st.rerun()
 
         with acciones[1]:
@@ -199,10 +252,14 @@ else:
                 st.success(f"«{elegida}» eliminada.", icon=":material/check:")
                 st.rerun()
 
-# ── Nueva suscripción ────────────────────────────────────
+# ── Nuevo cargo ──────────────────────────────────────────
 
 with st.container(border=True):
-    st.subheader("Nueva suscripción")
+    st.subheader("Nuevo gasto fijo o suscripción")
+    st.caption(
+        "El próximo cobro con su frecuencia dice cuándo toca cada vez. La "
+        "categoría ayuda a reconocer el movimiento que lo paga."
+    )
 
     catalogos = servicios.catalogos.opciones_captura()
     opciones_categoria = {"— sin categoría —": None} | {
@@ -231,10 +288,15 @@ with st.container(border=True):
     subcategoria_id = opciones_sub[subcategoria]
 
     with st.form("nueva_suscripcion", clear_on_submit=True, border=False):
+        clase = st.segmented_control(
+            "Clase",
+            [str(valor) for valor in ClaseCargo],
+            default=str(ClaseCargo.GASTO_FIJO),
+        )
         fila_1 = st.columns([2, 1, 1, 1])
 
         with fila_1[0]:
-            servicio = st.text_input("Servicio", placeholder="Streaming")
+            servicio = st.text_input("Concepto", placeholder="Renta, celular, Netflix")
         with fila_1[1]:
             costo = st.number_input(
                 "Costo por cobro", min_value=0.0, step=10.0, format="%.2f"
@@ -260,12 +322,21 @@ with st.container(border=True):
             )
         with fila_2[2]:
             renovacion = st.checkbox("Renovación automática", value=True)
+            posponible = st.checkbox(
+                "Se puede posponer",
+                value=False,
+                help="La renta, no. Si no alcanza, el plan la paga primero.",
+            )
+            posponer_hasta = st.date_input(
+                "Hasta",
+                value=None,
+                format="DD/MM/YYYY",
+                help="Sólo si se puede posponer. Vacío: sin límite.",
+            )
 
         notas = st.text_input("Notas")
 
-        if st.form_submit_button(
-            "Agregar suscripción", type="primary", icon=":material/add:"
-        ):
+        if st.form_submit_button("Agregar", type="primary", icon=":material/add:"):
             try:
                 servicios.suscripciones.crear(
                     servicio=servicio,
@@ -278,6 +349,9 @@ with st.container(border=True):
                     renovacion_automatica=renovacion,
                     necesidad=necesidad,
                     notas=notas,
+                    clase=clase or ClaseCargo.GASTO_FIJO,
+                    posponible=posponible,
+                    posponer_hasta=posponer_hasta,
                 )
             except ValueError as error:
                 reportar_error(error)

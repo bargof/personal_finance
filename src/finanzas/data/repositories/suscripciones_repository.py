@@ -4,7 +4,7 @@ import pandas as pd
 
 from finanzas.data.database import connect
 from finanzas.domain.entities import Suscripcion
-from finanzas.domain.enums import COBROS_POR_ANIO
+from finanzas.domain.enums import COBROS_POR_ANIO, ClaseCargo
 
 # ═══════════════════════════════════════════════════════════
 # Suscripciones: el gasto que se renueva solo y que casi
@@ -24,6 +24,9 @@ _CAMPOS_ESCRITURA = (
     "necesidad",
     "activa",
     "notas",
+    "clase",
+    "posponible",
+    "posponer_hasta",
 )
 
 
@@ -68,17 +71,34 @@ class SuscripcionesRepository:
         df["costo_mensual"] = df["costo_anual"] / 12
         df["activa"] = df["activa"].astype(bool)
         df["renovacion_automatica"] = df["renovacion_automatica"].astype(bool)
+        df["posponible"] = df["posponible"].astype(bool)
+        df["posponer_hasta"] = pd.to_datetime(
+            df["posponer_hasta"], errors="coerce"
+        ).dt.date
         df["candidato_a_cancelar"] = (
-            df["activa"] & (df["necesidad"] == "Deseo") & df["renovacion_automatica"]
+            (df["clase"] == str(ClaseCargo.SUSCRIPCION))
+            & df["activa"]
+            & (df["necesidad"] == "Deseo")
+            & df["renovacion_automatica"]
         )
 
         return df
 
-    def costo_mensual_total(self, solo_activas: bool = True) -> float:
-        """Devuelve el costo mensual normalizado de todas las suscripciones."""
+    def costo_mensual_total(
+        self, solo_activas: bool = True, clase: str | None = ClaseCargo.SUSCRIPCION
+    ) -> float:
+        """
+        Devuelve el costo mensual normalizado de los cargos de una clase.
+
+        Por defecto, sólo suscripciones: es lo que mide el indicador de
+        «suscripciones al mes», y la renta no debe inflarlo. Con `clase`
+        None suma todos los cargos fijos.
+        """
         df = self.listar(solo_activas=solo_activas)
         if df.empty:
             return 0.0
+        if clase is not None:
+            df = df[df["clase"] == str(clase)]
         return float(df["costo_mensual"].sum())
 
     def crear(self, suscripcion: Suscripcion) -> int:
@@ -133,4 +153,7 @@ def _a_valores(suscripcion: Suscripcion) -> list[object]:
         str(suscripcion.necesidad),
         int(suscripcion.activa),
         suscripcion.notas.strip(),
+        str(suscripcion.clase),
+        int(suscripcion.posponible),
+        suscripcion.posponer_hasta.isoformat() if suscripcion.posponer_hasta else None,
     ]

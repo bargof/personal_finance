@@ -8,12 +8,19 @@ import pandas as pd
 from finanzas.analytics.aggregations import periodo_de
 from finanzas.data.repositories.patrimonio_repository import PatrimonioRepository
 from finanzas.data.schemas import validar_patrimonio
+from finanzas.domain.calendario import ciclo_de_pago, siguiente_dia
 from finanzas.domain.entities import (
     CierreMensual,
     PosicionPatrimonial,
     SaldoVerificado,
 )
-from finanzas.domain.enums import Liquidez, OrigenSaldo, TipoCuenta, TipoPatrimonio
+from finanzas.domain.enums import (
+    EstadoPago,
+    Liquidez,
+    OrigenSaldo,
+    TipoCuenta,
+    TipoPatrimonio,
+)
 
 # ═══════════════════════════════════════════════════════════
 # Patrimonio
@@ -25,6 +32,14 @@ from finanzas.domain.enums import Liquidez, OrigenSaldo, TipoCuenta, TipoPatrimo
 # son cuenta —la casa, el auto— y los propios saldos
 # verificados.
 # ═══════════════════════════════════════════════════════════
+
+
+#: De dónde sale lo exigible de una deuda.
+FUENTE_CAPTURADO = "Capturado"
+FUENTE_CORTE = "Saldo al corte"
+FUENTE_PARCIALIDAD = "Parcialidad"
+FUENTE_SIN_MONTO = "Falta el monto"
+FUENTE_ACUMULADO = "Capturado + parcialidades"
 
 
 class PatrimonioService:
@@ -89,20 +104,130 @@ class PatrimonioService:
         favor también cuenta; una con deuda, no resta aquí porque no es
         liquidez negativa sino pasivo, y el pasivo se mide aparte.
         """
+        return round(float(self.activos_liquidos_detalle(fecha)["monto"].sum()), 2)
+
+    def activos_liquidos_detalle(self, fecha: date | None = None) -> pd.DataFrame:
+        """
+        Devuelve de dónde sale cada peso de los activos líquidos.
+
+        Una fila por cuenta líquida y por posición de liquidez alta. Una
+        cuenta en negativo aparece con cero y dice por qué: le falta un
+        saldo verificado o un movimiento, y restarla escondería el hueco.
+        Una cuenta restringida —un fondo de ahorro que no se puede tocar—
+        aparece también con cero: es tuya, pero no está disponible.
+        """
+        filas = []
         saldos = self.saldos(fecha)
-        total = 0.0
         if not saldos.empty:
             liquidas = saldos[saldos["tipo"].map(lambda t: TipoCuenta(t).es_liquida)]
-            total += float(liquidas["saldo"].clip(lower=0).sum())
+            for cuenta in liquidas.sort_values("saldo", ascending=False).itertuples():
+                saldo = float(cuenta.saldo)
+                if cuenta.restringida:
+                    monto = 0.0
+                    nota = f"Restringida ({saldo:,.2f}): no se puede usar aún"
+                elif saldo < 0:
+                    monto = 0.0
+                    nota = f"En negativo ({saldo:,.2f}): no suma"
+                else:
+                    monto = saldo
+                    nota = (
+                        ""
+                        if cuenta.verificado
+                        else "Sin saldo verificado: se suma desde cero"
+                    )
+                filas.append(
+                    {
+                        "concepto": cuenta.cuenta,
+                        "tipo": cuenta.tipo,
+                        "monto": round(monto, 2),
+                        "nota": nota,
+                    }
+                )
 
         posiciones = self._repo.listar()
         if not posiciones.empty:
             manuales = posiciones[
                 (posiciones["tipo"] == "Activo") & (posiciones["liquidez"] == "Alta")
             ]
-            total += float(manuales["saldo"].sum())
+            for posicion in manuales.itertuples():
+                filas.append(
+                    {
+                        "concepto": posicion.nombre,
+                        "tipo": "Bien de liquidez alta",
+                        "monto": round(float(posicion.saldo), 2),
+                        "nota": "",
+                    }
+                )
 
-        return round(total, 2)
+        return pd.DataFrame(filas, columns=["concepto", "tipo", "monto", "nota"])
+
+    def reglas_de_deudas(self) -> pd.DataFrame:
+        """
+        Devuelve, por cuenta de deuda, lo que el plan de pagos necesita.
+
+        Cuánto cuesta posponerla (`tasa_anual`, en proporción) y hasta
+        cuándo se puede (`posponer_hasta`), más su parcialidad y su día
+        de pago para proyectar los meses que vienen.
+        """
+        cuentas = self._repo.cuentas()
+        deudas = cuentas[cuentas["tipo"].map(lambda t: TipoCuenta(t).es_pasivo)].copy()
+        deudas["posponer_hasta"] = pd.to_datetime(
+            deudas["posponer_hasta"], errors="coerce"
+        ).dt.date
+        return deudas.rename(columns={"id": "cuenta_id", "nombre": "cuenta"})[
+            [
+                "cuenta_id",
+                "cuenta",
+                "tipo",
+                "tasa_anual",
+                "posponer_hasta",
+                "dia_pago",
+                "pago_mensual",
+            ]
+        ].reset_index(drop=True)
+
+    def fijar_reglas_deuda(
+        self,
+        cuenta_id: int,
+        tasa_anual: float | None = None,
+        posponer_hasta: date | None = None,
+    ) -> None:
+        """
+        Dice cuánto cuesta posponer una deuda y hasta cuándo se puede.
+
+        `tasa_anual` va en proporción (0.65 = 65 %). Una tarjeta se puede
+        posponer siempre, a su costo; un préstamo, sólo si tiene tasa o
+        fecha tope.
+
+        Raises
+        ------
+        ValueError
+            Si la cuenta no es de deuda o la tasa es negativa.
+        """
+        cuentas = self._repo.cuentas(solo_activas=False)
+        fila = cuentas[cuentas["id"] == cuenta_id]
+        if fila.empty:
+            raise ValueError(f"No existe la cuenta {cuenta_id}.")
+        if not TipoCuenta(fila.iloc[0]["tipo"]).es_pasivo:
+            raise ValueError("Sólo una cuenta de deuda tiene tasa o fecha tope.")
+        if tasa_anual is not None and float(tasa_anual) < 0:
+            raise ValueError("La tasa se captura en positivo.")
+
+        self._repo.guardar_reglas_deuda(
+            cuenta_id,
+            float(tasa_anual) if tasa_anual else None,
+            posponer_hasta,
+        )
+
+    def nombres_de_cuentas(self) -> dict[int, str]:
+        """{id: nombre} de todas las cuentas, activas o no."""
+        cuentas = self._repo.cuentas(solo_activas=False)
+        return {int(f.id): f.nombre for f in cuentas.itertuples()}
+
+    def cuentas_restringidas(self) -> set[int]:
+        """Ids de las cuentas cuyo dinero no se puede usar hasta retirarlo."""
+        cuentas = self._repo.cuentas(solo_activas=False)
+        return {int(i) for i in cuentas.loc[cuentas["restringida"] == 1, "id"]}
 
     def cuentas_sin_ancla(self) -> pd.DataFrame:
         """Devuelve las cuentas activas cuyo saldo se suma desde cero."""
@@ -194,6 +319,306 @@ class PatrimonioService:
     def olvidar_saldo(self, ancla_id: int) -> None:
         """Elimina un saldo verificado."""
         self._repo.eliminar_ancla(ancla_id)
+
+    # ── Lo exigible de cada deuda ────────────────────────
+
+    def exigibles(self, hoy: date | None = None) -> pd.DataFrame:
+        """
+        Devuelve, por cada cuenta de deuda, cuánto de ella ya hay que pagar.
+
+        El saldo de un préstamo o una tarjeta es todo lo que se debe; lo
+        exigible es la parte que ya toca pagar. Sale de una de tres
+        fuentes, en este orden:
+
+        1. Lo capturado a mano, mientras siga siendo del ciclo en curso: es
+           el pago para no generar intereses que dice el estado de cuenta,
+           y manda sobre cualquier estimación (con compras a meses, el
+           saldo al corte lo exageraría).
+        2. En una tarjeta con día de corte, lo que debía al último corte.
+        3. En un préstamo con parcialidad fija, esa parcialidad, más lo
+           que haya quedado sin pagar del ciclo anterior.
+
+        Los abonos a la cuenta dentro del ciclo lo descuentan, y lo
+        pendiente nunca rebasa la deuda total.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Una fila por cuenta de deuda activa, tenga o no exigible.
+        """
+        hoy = hoy or date.today()
+        columnas = [
+            "cuenta_id",
+            "cuenta",
+            "tipo",
+            "institucion",
+            "deuda",
+            "exigible",
+            "abonado",
+            "pendiente",
+            "fuente",
+            "corte",
+            "declarado_el",
+            "fecha_limite",
+            "dias",
+            "estado",
+            "nota",
+            "dia_corte",
+            "dia_pago",
+            "pago_mensual",
+        ]
+        saldos = self.saldos(hoy)
+        if saldos.empty:
+            return pd.DataFrame(columns=columnas)
+
+        deudas = saldos[saldos["tipo"].map(lambda t: TipoCuenta(t).es_pasivo)]
+        declarados = self._repo.exigibles().set_index("cuenta_id")
+        configuracion = self._repo.cuentas(solo_activas=False).set_index("id")
+        saldos_al_corte: dict[date, pd.DataFrame] = {}
+
+        filas = []
+        for fila in deudas.itertuples():
+            cuenta_id = int(fila.cuenta_id)
+            config = configuracion.loc[cuenta_id]
+            dia_corte = _entero_o_nulo(config["dia_corte"])
+            dia_pago = _entero_o_nulo(config["dia_pago"])
+            pago_mensual = (
+                float(config["pago_mensual"])
+                if pd.notna(config["pago_mensual"])
+                else None
+            )
+            es_tarjeta = TipoCuenta(fila.tipo) == TipoCuenta.CREDITO
+            ciclo = (
+                ciclo_de_pago(hoy, dia_pago, dia_corte if es_tarjeta else None)
+                if dia_pago
+                else None
+            )
+
+            deuda = max(0.0, float(fila.saldo_visto))
+            registro: dict[str, object] = {
+                "cuenta_id": cuenta_id,
+                "cuenta": fila.cuenta,
+                "tipo": fila.tipo,
+                "institucion": fila.institucion,
+                "deuda": round(deuda, 2),
+                "exigible": 0.0,
+                "abonado": 0.0,
+                "pendiente": 0.0,
+                "fuente": "",
+                "corte": ciclo.corte if ciclo else None,
+                "declarado_el": None,
+                "fecha_limite": ciclo.limite if ciclo else None,
+                "estado": "",
+                "nota": "",
+                "dia_corte": dia_corte,
+                "dia_pago": dia_pago,
+                "pago_mensual": pago_mensual,
+            }
+
+            declarado = (
+                declarados.loc[cuenta_id] if cuenta_id in declarados.index else None
+            )
+            vigente = declarado is not None and (
+                ciclo is None or declarado["declarado_el"].date() >= ciclo.corte
+            )
+            atraso = 0.0
+            # Un préstamo con parcialidad fija y algo capturado: lo capturado
+            # es el punto de partida y cada día de pago desde entonces suma
+            # una parcialidad, hasta el que vence en este ciclo. Así lo que
+            # se va dejando se acumula mes con mes —hasta que se pague o
+            # llegue su fecha tope— en vez de olvidarse al cambiar de ciclo.
+            acumula = (
+                not es_tarjeta
+                and ciclo is not None
+                and bool(pago_mensual)
+                and declarado is not None
+            )
+
+            if acumula:
+                desde = declarado["declarado_el"].date()
+                limite_capturado = (
+                    declarado["fecha_limite"].date()
+                    if pd.notna(declarado["fecha_limite"])
+                    else None
+                )
+                vencimientos = []
+                cuando = siguiente_dia(dia_pago, desde)
+                while cuando <= ciclo.limite:
+                    vencimientos.append(cuando)
+                    cuando = siguiente_dia(dia_pago, cuando)
+
+                exigible = float(declarado["monto"]) + pago_mensual * len(vencimientos)
+                atraso = (
+                    float(declarado["monto"])
+                    if limite_capturado is not None and limite_capturado < hoy
+                    else 0.0
+                ) + pago_mensual * sum(1 for v in vencimientos if v < hoy)
+                abonado = float(declarado["abonado"])
+                registro |= {
+                    "fuente": FUENTE_ACUMULADO,
+                    "declarado_el": desde,
+                    "fecha_limite": (
+                        ciclo.limite
+                        if vencimientos or limite_capturado is None
+                        else limite_capturado
+                    ),
+                    "nota": declarado["nota"],
+                }
+            elif vigente:
+                limite = (
+                    declarado["fecha_limite"].date()
+                    if pd.notna(declarado["fecha_limite"])
+                    else registro["fecha_limite"]
+                )
+                exigible = float(declarado["monto"])
+                abonado = float(declarado["abonado"])
+                registro |= {
+                    "fuente": FUENTE_CAPTURADO,
+                    "declarado_el": declarado["declarado_el"].date(),
+                    "fecha_limite": limite,
+                    "nota": declarado["nota"],
+                }
+            elif ciclo is not None and es_tarjeta and dia_corte:
+                if ciclo.corte not in saldos_al_corte:
+                    saldos_al_corte[ciclo.corte] = self.saldos(ciclo.corte).set_index(
+                        "cuenta_id"
+                    )
+                al_corte = saldos_al_corte[ciclo.corte]
+                exigible = (
+                    max(float(al_corte.loc[cuenta_id, "saldo_visto"]), 0.0)
+                    if cuenta_id in al_corte.index
+                    else 0.0
+                )
+                abonado = self._repo.abonos(cuenta_id, despues_de=ciclo.corte)
+                registro["fuente"] = FUENTE_CORTE
+            elif ciclo is not None and pago_mensual:
+                # Lo que quedó sin pagar del ciclo anterior sigue debiéndose
+                # y ya está vencido: se paga antes que lo de este ciclo.
+                atraso = max(
+                    pago_mensual
+                    - self._repo.abonos(
+                        cuenta_id, despues_de=ciclo.corte_anterior, hasta=ciclo.corte
+                    ),
+                    0.0,
+                )
+                exigible = pago_mensual + atraso
+                abonado = self._repo.abonos(cuenta_id, despues_de=ciclo.corte)
+                registro["fuente"] = FUENTE_PARCIALIDAD
+            else:
+                if ciclo is not None:
+                    registro["fuente"] = FUENTE_SIN_MONTO
+                registro["dias"] = _dias(registro["fecha_limite"], hoy)
+                filas.append(registro)
+                continue
+
+            pendiente = round(min(max(exigible - abonado, 0.0), deuda), 2)
+            if pendiente < 0.005:
+                estado = EstadoPago.PAGADO
+            elif atraso > abonado + 0.005:
+                estado = EstadoPago.VENCIDO
+            else:
+                estado = EstadoPago.segun_fecha(registro["fecha_limite"], hoy)
+
+            registro |= {
+                "exigible": round(exigible, 2),
+                "abonado": round(abonado, 2),
+                "pendiente": pendiente,
+                "estado": str(estado),
+                "dias": _dias(registro["fecha_limite"], hoy),
+            }
+            filas.append(registro)
+
+        return pd.DataFrame(filas, columns=columnas)
+
+    def fijar_calendario_deuda(
+        self,
+        cuenta_id: int,
+        dia_pago: int | None,
+        dia_corte: int | None = None,
+        pago_mensual: float | None = None,
+    ) -> None:
+        """
+        Fija los días de corte y de pago de una deuda, y su parcialidad.
+
+        Con ellos lo exigible sale solo cada ciclo: en una tarjeta, lo que
+        debía al corte; en un préstamo, la parcialidad. Pasar None en
+        `dia_pago` los quita.
+
+        Raises
+        ------
+        ValueError
+            Si la cuenta no es de deuda, un día no está entre 1 y 31, se da
+            día de corte a algo que no es tarjeta o la parcialidad es
+            negativa.
+        """
+        cuentas = self._repo.cuentas(solo_activas=False)
+        fila = cuentas[cuentas["id"] == cuenta_id]
+        if fila.empty:
+            raise ValueError(f"No existe la cuenta {cuenta_id}.")
+        tipo = TipoCuenta(fila.iloc[0]["tipo"])
+        if not tipo.es_pasivo:
+            raise ValueError(
+                "Sólo una cuenta de deuda —tarjeta o préstamo— tiene días de pago."
+            )
+        for dia in (dia_pago, dia_corte):
+            if dia is not None and not 1 <= int(dia) <= 31:
+                raise ValueError("Los días van del 1 al 31.")
+        if dia_corte is not None and tipo != TipoCuenta.CREDITO:
+            raise ValueError("Sólo una tarjeta de crédito tiene día de corte.")
+        if pago_mensual is not None and float(pago_mensual) < 0:
+            raise ValueError("La parcialidad se captura en positivo.")
+
+        if dia_pago is None:
+            dia_corte, pago_mensual = None, None
+
+        self._repo.guardar_calendario_deuda(
+            cuenta_id,
+            int(dia_corte) if dia_corte is not None else None,
+            int(dia_pago) if dia_pago is not None else None,
+            float(pago_mensual) if pago_mensual else None,
+        )
+
+    def fijar_exigible(
+        self,
+        cuenta_id: int,
+        monto: float,
+        fecha_limite: date | None = None,
+        declarado_el: date | None = None,
+        nota: str = "",
+    ) -> None:
+        """
+        Declara cuánto de la deuda de una cuenta ya hay que pagar.
+
+        Capturarlo otra vez lo corrige. Los abonos a la cuenta desde
+        `declarado_el` (hoy, si no se dice) lo van descontando.
+
+        Raises
+        ------
+        ValueError
+            Si la cuenta no existe, no es de deuda o el monto es negativo.
+        """
+        cuentas = self._repo.cuentas(solo_activas=False)
+        fila = cuentas[cuentas["id"] == cuenta_id]
+        if fila.empty:
+            raise ValueError(f"No existe la cuenta {cuenta_id}.")
+        if not TipoCuenta(fila.iloc[0]["tipo"]).es_pasivo:
+            raise ValueError(
+                "Sólo una cuenta de deuda —tarjeta o préstamo— tiene algo exigible."
+            )
+        if float(monto) < 0:
+            raise ValueError("Lo exigible se captura en positivo.")
+
+        self._repo.guardar_exigible(
+            cuenta_id,
+            float(monto),
+            declarado_el or date.today(),
+            fecha_limite,
+            nota,
+        )
+
+    def quitar_exigible(self, cuenta_id: int) -> None:
+        """Deja una cuenta de deuda sin nada exigible declarado."""
+        self._repo.eliminar_exigible(cuenta_id)
 
     # ── Evolución mensual ────────────────────────────────
 
@@ -375,6 +800,18 @@ class PatrimonioService:
     def eliminar(self, posicion_id: int) -> None:
         """Elimina una posición patrimonial."""
         self._repo.eliminar(posicion_id)
+
+
+def _dias(limite: object, hoy: date) -> int | None:
+    """Días que faltan para `limite`; negativo si ya pasó."""
+    return (limite - hoy).days if isinstance(limite, date) else None
+
+
+def _entero_o_nulo(valor: object) -> int | None:
+    """Convierte a int cuidando los nulos que llegan desde pandas."""
+    if valor is None or pd.isna(valor):
+        return None
+    return int(valor)
 
 
 def _validar_nombre(nombre: str) -> str:

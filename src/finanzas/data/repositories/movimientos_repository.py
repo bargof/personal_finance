@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 
@@ -468,6 +468,97 @@ class MovimientosRepository:
                 (fecha_pago.isoformat() if fecha_pago else None, movimiento_id),
             )
 
+    def completar_con_banco(
+        self,
+        movimiento_id: int,
+        descripcion_banco: str,
+        referencia_externa: str,
+        fecha_banco: date,
+        fecha_pago: date | None,
+    ) -> dict[str, object] | None:
+        """
+        Le pone a un movimiento capturado a mano los datos del banco.
+
+        Sólo toca el concepto, el folio y la fecha del banco, y la fecha
+        de pago si no tenía: lo que el usuario escribió —descripción,
+        categoría, fecha— se queda. La condición va en el propio UPDATE
+        para que nunca pise los datos del banco de un movimiento que ya
+        los tenía, aunque algo haya cambiado desde que se leyó.
+
+        Returns
+        -------
+        dict or None
+            Lo necesario para deshacerlo, o None si el movimiento ya
+            tenía datos del banco y no se tocó.
+        """
+        with connect(self._db_path) as conexion:
+            fila = conexion.execute(
+                """
+                SELECT fecha_banco, fecha_pago FROM movimientos
+                 WHERE id = ? AND descripcion_banco = '' AND referencia_externa = ''
+                """,
+                (movimiento_id,),
+            ).fetchone()
+            if fila is None:
+                return None
+
+            poner_pago = fecha_pago is not None and fila["fecha_pago"] is None
+            conexion.execute(
+                """
+                UPDATE movimientos
+                   SET descripcion_banco = ?,
+                       referencia_externa = ?,
+                       fecha_banco = ?,
+                       fecha_pago = CASE WHEN ? THEN ? ELSE fecha_pago END,
+                       actualizado_en = datetime('now')
+                 WHERE id = ? AND descripcion_banco = '' AND referencia_externa = ''
+                """,
+                (
+                    descripcion_banco.strip(),
+                    referencia_externa.strip(),
+                    _iso(fecha_banco),
+                    int(poner_pago),
+                    _iso(fecha_pago),
+                    movimiento_id,
+                ),
+            )
+
+        return {"fecha_banco": fila["fecha_banco"], "puso_fecha_pago": poner_pago}
+
+    def deshacer_completado(
+        self,
+        movimiento_id: int,
+        descripcion_banco: str,
+        referencia_externa: str,
+        antes: dict[str, object],
+    ) -> bool:
+        """
+        Devuelve un movimiento completado a como estaba antes.
+
+        Sólo si sigue teniendo los datos que se le pusieron: si alguien
+        los cambió después, ya no son los nuestros y no se tocan.
+        """
+        with connect(self._db_path) as conexion:
+            cursor = conexion.execute(
+                """
+                UPDATE movimientos
+                   SET descripcion_banco = '',
+                       referencia_externa = '',
+                       fecha_banco = ?,
+                       fecha_pago = CASE WHEN ? THEN NULL ELSE fecha_pago END,
+                       actualizado_en = datetime('now')
+                 WHERE id = ? AND descripcion_banco = ? AND referencia_externa = ?
+                """,
+                (
+                    antes.get("fecha_banco"),
+                    int(bool(antes.get("puso_fecha_pago"))),
+                    movimiento_id,
+                    descripcion_banco.strip(),
+                    referencia_externa.strip(),
+                ),
+            )
+            return cursor.rowcount > 0
+
     def eliminar(self, movimiento_id: int) -> None:
         """Elimina un movimiento."""
         with connect(self._db_path) as conexion:
@@ -495,7 +586,7 @@ class MovimientosRepository:
 def _a_valores(movimiento: Movimiento) -> list[object]:
     """Aplana un movimiento al orden de columnas de `_CAMPOS_ESCRITURA`."""
     return [
-        movimiento.fecha.isoformat(),
+        _iso(movimiento.fecha),
         str(movimiento.tipo),
         float(movimiento.monto),
         movimiento.categoria_id,
@@ -512,14 +603,28 @@ def _a_valores(movimiento: Movimiento) -> list[object]:
         movimiento.etiquetas.strip(),
         movimiento.nota.strip(),
         str(movimiento.estado),
-        movimiento.fecha_pago.isoformat() if movimiento.fecha_pago else None,
+        _iso(movimiento.fecha_pago),
         movimiento.descripcion_banco.strip(),
         movimiento.referencia_externa.strip(),
         movimiento.empresa.strip(),
         movimiento.lugar.strip(),
         movimiento.hora.strftime("%H:%M") if movimiento.hora else None,
-        movimiento.fecha_banco.isoformat() if movimiento.fecha_banco else None,
+        _iso(movimiento.fecha_banco),
     ]
+
+
+def _iso(fecha: date | None) -> str | None:
+    """
+    Escribe una fecha como «AAAA-MM-DD», o None.
+
+    Un `datetime` (o un `pd.Timestamp`) también es un `date`, pero su
+    `isoformat()` añade «T00:00:00» y luego `date.fromisoformat` no lo lee.
+    """
+    if fecha is None:
+        return None
+    if isinstance(fecha, datetime):
+        fecha = fecha.date()
+    return fecha.isoformat()
 
 
 def _tipar(df: pd.DataFrame) -> pd.DataFrame:

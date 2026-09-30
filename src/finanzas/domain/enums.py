@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from enum import StrEnum
 
 # ═══════════════════════════════════════════════════
@@ -134,6 +135,45 @@ class FrecuenciaCobro(StrEnum):
     TRIMESTRAL = "Trimestral"
     SEMESTRAL = "Semestral"
     ANUAL = "Anual"
+
+
+class ClaseCargo(StrEnum):
+    """
+    Qué tipo de cargo fijo es.
+
+    Una suscripción es discrecional y se puede cancelar; un gasto fijo
+    —la renta, el celular— es un compromiso. Los dos tienen monto y
+    fecha, y los dos entran al calendario de pagos.
+    """
+
+    SUSCRIPCION = "Suscripción"
+    GASTO_FIJO = "Gasto fijo"
+
+
+class EstadoPago(StrEnum):
+    """Dónde está un pago que toca hacer: un cargo fijo o algo exigible."""
+
+    PAGADO = "Pagado"
+    POR_PAGAR = "Por pagar"
+    VENCE_HOY = "Vence hoy"
+    VENCIDO = "Vencido"
+
+    @classmethod
+    def segun_fecha(cls, limite: date | None, hoy: date) -> EstadoPago:
+        """El estado de algo aún sin pagar, según su fecha límite."""
+        if limite is None or limite > hoy:
+            return cls.POR_PAGAR
+        if limite == hoy:
+            return cls.VENCE_HOY
+        return cls.VENCIDO
+
+
+class EstadoIngreso(StrEnum):
+    """Dónde está un ingreso fijo del mes, como la nómina de una quincena."""
+
+    RECIBIDO = "Recibido"
+    POR_RECIBIR = "Por recibir"
+    ATRASADO = "Atrasado"
 
 
 #: Cobros al año por frecuencia, para normalizar suscripciones a costo mensual.

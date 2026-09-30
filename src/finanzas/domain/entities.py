@@ -5,6 +5,7 @@ from datetime import date, time
 
 from finanzas.domain.enums import (
     COBROS_POR_ANIO,
+    ClaseCargo,
     EstadoDeseo,
     EstadoMeta,
     EstadoMovimiento,
@@ -466,6 +467,11 @@ class Suscripcion:
     necesidad: Necesidad = Necesidad.DESEO
     activa: bool = True
     notas: str = ""
+    clase: ClaseCargo = ClaseCargo.SUSCRIPCION
+    #: Si se puede dejar para el mes siguiente cuando no alcanza.
+    posponible: bool = False
+    #: Hasta cuándo; None, sin límite.
+    posponer_hasta: date | None = None
 
     @property
     def costo_anual(self) -> float:
@@ -481,7 +487,8 @@ class Suscripcion:
     def candidato_a_cancelar(self) -> bool:
         """Suscripción activa, discrecional y con renovación automática."""
         return (
-            self.activa
+            self.clase == ClaseCargo.SUSCRIPCION
+            and self.activa
             and self.necesidad == Necesidad.DESEO
             and self.renovacion_automatica
         )

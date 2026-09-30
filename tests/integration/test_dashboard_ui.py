@@ -94,7 +94,12 @@ def test_el_visor_lista_todas_las_cuentas(base_ui):
 
     nombres = set(CatalogosService().cuentas()["nombre"])
     assert nombres <= set(metricas)
-    assert {"Disponible", "Deuda en cuentas", "Por pagar"} <= set(metricas)
+    assert {
+        "Ingreso del mes",
+        "Disponible hoy",
+        "Por pagar",
+        "Queda después de pagar",
+    } <= set(metricas)
 
 
 def test_una_deuda_se_ve_en_positivo_y_baja_con_el_abono(con_deuda):
@@ -108,7 +113,7 @@ def test_una_deuda_se_ve_en_positivo_y_baja_con_el_abono(con_deuda):
     metricas = _metricas(prueba)
 
     assert metricas["Colegiatura"] == "$25,000"
-    assert metricas["Deuda en cuentas"] == "$25,000"
+    assert metricas["Deuda total"] == "$25,000"
     assert metricas["Gastos"] == "$0"
 
 
@@ -125,3 +130,27 @@ def test_el_visor_esta_aunque_el_periodo_no_tenga_movimientos(con_deuda):
 
     assert not prueba.exception, [str(e) for e in prueba.exception]
     assert "Colegiatura" in _metricas(prueba)
+
+
+def test_el_dashboard_y_pagos_del_mes_dicen_lo_mismo(con_deuda):
+    """
+    Ingreso y disponible son reales en las dos páginas y coinciden.
+
+    «Por pagar» y «Queda» en Pagos del mes siguen el plan y lo dicen; el
+    Dashboard muestra lo real, que es lo que Pagos del mes da como «sin él».
+    """
+    pagos = AppTest.from_file(
+        str(DASHBOARD.parent / "app_pages" / "pagos.py"), default_timeout=60
+    )
+    pagos.run()
+    assert not pagos.exception, [str(e) for e in pagos.exception]
+
+    del_dashboard = _metricas(_dashboard())
+    de_pagos = _metricas(pagos)
+
+    for cifra in ("Ingreso del mes", "Disponible hoy"):
+        assert del_dashboard[cifra] == de_pagos[cifra], cifra
+
+    por_pagar = next(m for m in pagos.metric if m.label == "Por pagar")
+    assert por_pagar.delta.startswith("con tu plan")
+    assert por_pagar.delta.endswith(del_dashboard["Por pagar"])

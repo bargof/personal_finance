@@ -290,3 +290,53 @@ def test_terminar_lleva_al_resumen_con_lo_guardado(base_ui):
 
     assert prueba.session_state["paso"] == "guardar"
     assert len(MovimientosService().buscar()) == 2
+
+
+# ═══════════════════════════════════════════════════════════
+# Lo capturado a mano, completado con los datos del banco
+# ═══════════════════════════════════════════════════════════
+
+
+def test_completar_lo_capturado_a_mano_desde_la_tabla(base_ui):
+    """
+    La sección aparece en la revisión y el botón de siempre la aplica.
+
+    Lo demás del documento sigue su camino: las líneas nuevas pasan al
+    paso de completar, como antes.
+    """
+    from finanzas.data.repositories.catalogos_repository import CatalogosRepository
+
+    cuentas = CatalogosRepository(base_ui).mapa_nombre_id("cuentas")
+    categorias = CatalogosRepository(base_ui).mapa_nombre_id("categorias")
+    movimientos = MovimientosService()
+    didi = movimientos.registrar(
+        fecha=date(2026, 8, 1),
+        tipo="Gasto",
+        monto=100.0,
+        categoria_id=categorias["Restaurantes"],
+        cuenta_id=cuentas["Cuenta principal"],
+        descripcion="Didi al trabajo",
+    )
+
+    importacion = ImportacionService()
+    resultado = importacion.leer_documento(DOCUMENTO)
+    resultado.cuenta_id = cuentas["Cuenta principal"]
+    importacion.contrastar(resultado)
+
+    prueba = AppTest.from_file(str(PAGINA), default_timeout=60)
+    prueba.session_state["importacion"] = resultado
+    prueba.session_state["paso"] = "revisar"
+    prueba.run()
+    assert not prueba.exception, [str(e) for e in prueba.exception]
+
+    assert "Registrados a mano que puedo completar" in [
+        s.value for s in prueba.subheader
+    ]
+
+    _control(prueba, "button", "Completar información").click().run()
+    assert not prueba.exception, [str(e) for e in prueba.exception]
+
+    fila = movimientos.buscar().set_index("id").loc[didi]
+    assert fila["descripcion_banco"] == "DIDI"
+    assert fila["descripcion"] == "Didi al trabajo"
+    assert prueba.session_state["paso"] == "completar"
