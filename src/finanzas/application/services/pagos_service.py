@@ -166,8 +166,9 @@ class PagosService:
 
         Lo que vence en los primeros días del mes siguiente —hasta el día
         de anticipación, el 1 por defecto: la renta— se paga con el dinero
-        de este mes, así que va aquí, marcado «adelantado». Se hace en el
-        mes en curso y en cada mes del plan; en un mes que ya pasó, no.
+        de este mes, así que va aquí, marcado «adelantado». También en un
+        mes que ya pasó: ahí sigue, pendiente mientras no se registre el
+        pago y pagado cuando se registre.
 
         Parameters
         ----------
@@ -207,10 +208,8 @@ class PagosService:
         inicio, fin = _limites_del_mes(mes)
         dias = self.anticipacion_dias()
         siguiente = fin + timedelta(days=1)
-        # Hasta qué día del mes siguiente se paga con el dinero de este. En
-        # un mes que ya pasó no hay nada que preparar.
-        adelanta = dias > 0 and (inicio <= hoy <= fin or en_plan)
-        horizonte = _dia_del_mes(siguiente, dias) if adelanta else fin
+        # Hasta qué día del mes siguiente se paga con el dinero de este.
+        horizonte = _dia_del_mes(siguiente, dias) if dias > 0 else fin
         gastos = self._movimientos.listar(
             desde=inicio - timedelta(days=VENTANA_DIAS),
             hasta=max(fin, horizonte) + timedelta(days=VENTANA_DIAS),

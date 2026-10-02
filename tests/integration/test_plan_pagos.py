@@ -675,3 +675,27 @@ def test_la_liquidacion_aparece_en_las_acciones(pagos, fondo):
 
     liquidacion = acciones[acciones["accion"] == "Liquidación del fondo (simulado)"]
     assert liquidacion["monto"].tolist() == [10_000.0]
+
+
+def test_desde_un_mes_que_ya_paso_la_renta_del_1_no_se_pierde(
+    pagos, renta_del_1, db_path, ids_catalogo
+):
+    """El 1 de octubre, sin pagar aún, el plan desde septiembre la pide."""
+    MovimientosService(MovimientosRepository(db_path)).registrar(
+        fecha=date(2026, 9, 1),
+        tipo=TipoMovimiento.GASTO,
+        monto=3_000.0,
+        categoria_id=ids_catalogo["vivienda"],
+        cuenta_id=ids_catalogo["cuenta"],
+        descripcion="Renta",
+    )
+    plan = pagos.plan(SEPTIEMBRE, date(2026, 10, 1))
+    rentas = [
+        r.obligacion.vence
+        for m in plan
+        for r in m.resoluciones
+        if r.obligacion.concepto == "Renta"
+    ]
+
+    assert date(2026, 10, 1) in rentas
+    assert rentas.count(date(2026, 10, 1)) == 1

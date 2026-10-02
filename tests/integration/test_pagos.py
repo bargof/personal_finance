@@ -984,12 +984,35 @@ def test_lo_que_vence_despues_del_1_se_queda_en_su_mes(pagos, cargos, ids_catalo
     assert not calendario["adelantado"].any()
 
 
-def test_un_mes_que_no_es_el_actual_no_se_adelanta(pagos, cargos, ids_catalogo):
+def test_un_mes_que_ya_paso_sigue_pidiendo_la_renta_del_1(
+    pagos, cargos, servicio, ids_catalogo
+):
+    """El 1 de octubre, septiembre sigue debiendo la renta de octubre."""
     _renta(cargos, ids_catalogo, proximo_cobro=date(2026, 10, 1))
+    _renta_pagada(servicio, ids_catalogo, date(2026, 9, 1))
 
-    calendario = pagos.calendario(date(2026, 8, 1), date(2026, 9, 29))
+    hoy = date(2026, 10, 1)
+    calendario = pagos.calendario(SEPTIEMBRE, hoy)
+    octubre = calendario[calendario["adelantado"]].iloc[0]
 
-    assert calendario["fecha"].tolist() == [date(2026, 8, 1)]
+    assert octubre["fecha"] == date(2026, 10, 1)
+    assert octubre["estado"] != str(EstadoPago.PAGADO)
+    assert pagos.por_pagar(SEPTIEMBRE, hoy)["fecha_limite"].tolist() == [
+        date(2026, 10, 1)
+    ]
+
+
+def test_un_mes_que_ya_paso_muestra_la_renta_del_1_pagada(
+    pagos, cargos, servicio, ids_catalogo
+):
+    _renta(cargos, ids_catalogo, proximo_cobro=date(2026, 10, 1))
+    _renta_pagada(servicio, ids_catalogo, date(2026, 9, 1))
+    octubre = _renta_pagada(servicio, ids_catalogo, date(2026, 10, 1))
+
+    calendario = pagos.calendario(SEPTIEMBRE, date(2026, 10, 2)).set_index("fecha")
+
+    assert calendario.loc[date(2026, 10, 1), "movimiento_id"] == octubre
+    assert calendario.loc[date(2026, 10, 1), "estado"] == str(EstadoPago.PAGADO)
 
 
 def test_la_renta_pagada_por_adelantado_queda_pagada(
